@@ -1,0 +1,61 @@
+# UI and Drawing
+
+## Control Panel
+
+The control panel is Dear ImGui rendered with the Win32 and Direct3D 11 backends. It is an external window, not an in-process game menu. The Settings tab is reserved and sorted after all script-created tabs. Controls are grouped by the most recent `ui_tab(name)` and `ui_section(name)` calls; if no tab is selected, controls use `Main` and `General`.
+
+The panel stays hidden until controls are created. It scrolls vertically when content exceeds its window. Drag the title strip to move it within the Roblox client area; the last dock offset follows the game window. Home hides/shows the UI and End unloads by default. Both keybinds can be changed in the Settings tab.
+
+### Keybinds and Callbacks
+
+Use `ui_keybind(label, virtualKey)` to make a keybind control and `ui_on_pressed(id, callback)` to attach an action. The callback receives the control ID. `ui_on_changed` is for value controls such as checkboxes, sliders, dropdowns, and text inputs. Keybind values are Windows virtual-key codes. The wrapper accepts a single character such as `"K"` or a numeric virtual-key code. Home and End are the defaults for UI toggle and unload.
+
+The Settings keybind capture UI ignores Home and End while rebinding. Those keys remain reserved for the built-in panel toggle/unload defaults. `request_unload()` signals the host; the main thread pumps its windows until the Luau worker shuts down cleanly.
+
+## Settings
+
+The built-in final tab contains:
+
+- Save, load, and delete config actions
+- A runner for a named script under `C:/LUSTED/Luas`
+- Roblox process rescan, including offsets refresh when the player version changes
+- UI-toggle and unload keybinds
+- An in-panel status label
+
+Config names are restricted to ASCII letters, digits, `_`, and `-`, up to 48 characters. Values are matched by type, tab, section, label, and duplicate occurrence. Keep those names stable if configs should survive script edits. Toggle, slider, dropdown, input, and keybind values persist; labels and buttons do not.
+
+## Drawing API
+
+The drawing layer is a transparent, click-through GDI overlay. Its background uses a color key, so each drawable supports RGB color but not per-object alpha compositing.
+
+Raw functions:
+
+- `drawing_new(type)` creates an object and returns its numeric ID.
+- `drawing_set(id, property, value)` sets an object property and returns success.
+- `drawing_get(id, property)` reads an object property.
+- `drawing_destroy(id)` removes one object.
+- `drawing_clear()` removes all objects.
+
+Supported types are `Line`, `Square` (or `Box`), `Circle`, and `Text`. Values for positions and sizes are two-element arrays; colors are three-element RGB arrays. Common properties are `Visible`, `Color`, `Thickness`, and `Filled`.
+
+| Type | Main properties |
+| --- | --- |
+| `Line` | `From`, `To`, `Color`, `Thickness`, `Visible` |
+| `Square` / `Box` | `Position`, `Size`, `Color`, `Thickness`, `Filled`, `Visible` |
+| `Circle` | center `Position`, `Radius`, `Color`, `Thickness`, `Filled`, `Visible` |
+| `Text` | `Position`, `Text`, `Color`, `Size`/`FontSize`, `Center`, `Visible` |
+
+With `drawing.luau` loaded, `Drawing.new(type)` returns an object wrapper supporting property assignment, `Set`, `Get`, and `Remove`.
+
+```lua
+local line = Drawing.new("Line")
+line.From = { 30, 40 }
+line.To = { 180, 100 }
+line.Color = { 220, 48, 48 }
+line.Thickness = 2
+
+local text = Drawing.new("Text")
+text.Position = { 30, 110 }
+text.Text = "Hello from Luau"
+text.Color = { 240, 240, 240 }
+```

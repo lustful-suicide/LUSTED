@@ -1,0 +1,51 @@
+{
+  "$schema": "https://docs.page/schema.json",
+  "name": "LUSTED",
+  "description": "LUSTED documentation",
+  "sidebar": [
+    {
+      "group": "Getting Started",
+      "pages": [
+        {
+          "title": "Overview",
+          "href": "/",
+          "icon": "rocket"
+        },
+        {
+          "title": "Runtime Data and Settings",
+          "href": "/runtime-data",
+          "icon": "database"
+        }
+      ]
+    },
+    {
+      "group": "Scripting",
+      "pages": [
+        {
+          "title": "Luau Scripting",
+          "href": "/luau-scripting",
+          "icon": "code"
+        },
+        {
+          "title": "UI and Drawing",
+          "href": "/ui-and-drawing",
+          "icon": "pen-to-square"
+        }
+      ]
+    },
+    {
+      "group": "Support",
+      "pages": [
+        {
+          "title": "Troubleshooting",
+          "href": "/troubleshooting",
+          "icon": "wrench"
+        }
+      ]
+    }
+  ],
+  "redirects": {
+    "/README": "/",
+    "/next-steps": "/"
+  }
+}

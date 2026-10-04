@@ -1,0 +1,191 @@
+#include "roblox_finder.h"
+#include "offsets_fetcher.h"
+#include "memory.h"
+#include "instance.h"
+#include "ui.h"
+#include "drawing.h"
+#include "luau_manager.h"
+#include <iostream>
+#include <filesystem>
+#include <fstream>
+#include <algorithm>
+#include <cctype>
+#include <thread>
+#include <atomic>
+#include <vector>
+#include <nlohmann/json.hpp>
+
+static std::filesystem::path FindExamplesDir() {
+    std::vector<std::filesystem::path> candidates;
+    std::vector<wchar_t> pathBuffer(32768);
+    DWORD pathLength = GetModuleFileNameW(nullptr, pathBuffer.data(), (DWORD)pathBuffer.size());
+    if (pathLength && pathLength < pathBuffer.size()) {
+        std::filesystem::path executable(pathBuffer.data(), pathBuffer.data() + pathLength);
+        candidates.push_back(executable.parent_path() / L"examples");
+        candidates.push_back(executable.parent_path().parent_path() / L"examples");
+    }
+    candidates.push_back(std::filesystem::current_path() / L"examples");
+
+    std::error_code ec;
+    for (const auto& candidate : candidates) {
+        if (std::filesystem::exists(candidate / L"ui.luau", ec)) return candidate;
+        ec.clear();
+    }
+    return candidates.empty() ? std::filesystem::path(L"examples") : candidates.front();
+}
+
+static std::vector<std::filesystem::path> CollectLuas(const std::filesystem::path& dir) {
+    std::vector<std::filesystem::path> out;
+    std::error_code ec;
+    if (!std::filesystem::exists(dir, ec)) return out;
+    for (auto& e : std::filesystem::directory_iterator(dir, ec)) {
+        if (ec) break;
+        if (!e.is_regular_file(ec)) continue;
+        auto ext = e.path().extension().string();
+        if (ext == ".luau" || ext == ".lua") out.push_back(e.path());
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+static bool LooksLikeHash(const std::string& s) {
+    std::string h = s;
+    if (h.rfind("version-", 0) == 0) h = h.substr(8);
+    if (h.size() < 8 || h.size() > 64) return false;
+    for (char c : h) if (!isxdigit((unsigned char)c)) return false;
+    return true;
+}
+
+int main(int argc, char** argv) {
+    std::cout << "Lusted external -- finder + offsets + custom-write + luau (auto)" << std::endl;
+
+    bool once = false;
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--help" || a == "-h") {
+            std::cout << "usage: lusted.exe [versionHash] [--once]" << std::endl;
+            std::cout << "  auto-executes C:/LUSTED/Luas/*.luau (sorted)" << std::endl;
+            return 0;
+        }
+        if (a == "--once") once = true;
+    }
+
+    // fast finder on main thread (no heavy scan yet)
+    auto found = FindRobloxPlayer();
+    std::string versionHash = "02c37bc51a384b8f";
+    DWORD pid = 0;
+    if (found) {
+        std::cout << "[finder] exe: " << found->exePath << std::endl;
+        if (!found->versionHash.empty()) versionHash = found->versionHash;
+        std::cout << "[finder] version-" << versionHash << std::endl;
+        if (!found->fileVersion.empty()) std::cout << "[finder] file version: " << found->fileVersion << std::endl;
+        pid = found->pid;
+        std::cout << "[finder] pid: " << pid << (pid ? " (running)" : " (not running)") << std::endl;
+    } else {
+        std::cout << "[finder] RobloxPlayerBeta.exe not found, using fallback version-" << versionHash << std::endl;
+    }
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a.rfind("--", 0) == 0) continue;
+        if (LooksLikeHash(a)) {
+            versionHash = a.rfind("version-", 0) == 0 ? a.substr(8) : a;
+            break;
+        }
+    }
+
+    // UI + overlay first so windows paint while worker scans (no Not Responding)
+    UiManager ui;
+    DrawingManager drawing;
+    if (!ui.Init("LUSTED", pid)) {
+        std::cerr << "[ui] Dear ImGui initialization failed" << std::endl;
+        return 1;
+    }
+    drawing.Init(pid);
+    ui.Poll(); drawing.Poll();
+
+    std::atomic<bool> done{ false };
+    std::atomic<bool> finished{ false };
+    std::atomic<bool> stop{ false };
+    std::atomic<int> code{ 0 };
+
+    std::thread worker([&]() {
+        OffsetsFetcher fetcher(versionHash);
+        OffsetBundle bundle = fetcher.FetchAll();
+        std::cout << "[urls]\n  " << OffsetsFetcher::UrlOffsetsJson(versionHash) << "\n  "
+                  << OffsetsFetcher::UrlStructHpp(versionHash) << "\n  "
+                  << OffsetsFetcher::UrlFflagsJson(versionHash) << std::endl;
+        if (!bundle.ok)
+            std::cerr << "[warn] some downloads failed. Check " << bundle.dir.string() << std::endl;
+
+        Memory mem;
+        if (pid && mem.Attach(pid)) std::cout << "[memory] attached (CustomWrite NT path)" << std::endl;
+        else std::cout << "[memory] no live attach; helpers return nil until Roblox runs." << std::endl;
+
+        InstanceStore inst(&mem);
+        LuauManager luau(&mem, &inst, &pid, &ui, &drawing, &stop);
+        if (!luau.Init(versionHash, bundle.offsetsJson.string())) {
+            std::cerr << "luau init failed" << std::endl; code = 1; done = true; finished = true; return;
+        }
+        const auto examplesDir = FindExamplesDir();
+        for (const auto& name : { L"helpers.luau", L"ui.luau", L"drawing.luau" }) {
+            const auto file = examplesDir / name;
+            if (!std::filesystem::exists(file)) {
+                std::cerr << "[luau] required standard module not found: " << file.string() << std::endl;
+                code = 1; done = true; finished = true; return;
+            }
+            std::cout << "[luau] loading " << file.string() << std::endl;
+            if (!luau.RunFile(file)) {
+                std::cerr << "[luau] standard module failed: " << file.string() << std::endl;
+                code = 1; done = true; finished = true; return;
+            }
+        }
+
+        std::filesystem::path autoDir("C:/LUSTED/Luas");
+        std::error_code ec;
+        std::filesystem::create_directories(autoDir, ec);
+        auto luas = CollectLuas(autoDir);
+        std::cout << "[auto] " << luas.size() << " file(s) in " << autoDir.string() << std::endl;
+        for (auto& f : luas) {
+            std::cout << "[auto] running " << f.string() << std::endl;
+            if (!luau.RunFile(f)) std::cerr << "[auto] failed: " << f.string() << std::endl;
+        }
+        std::cout << "[run] auto-execution done." << std::endl;
+        done = true;
+        while (!once && !stop) {
+            luau.Poll();
+            Sleep(16);
+        }
+        finished = true;
+    });
+
+    // main thread: pump UI + overlay so Windows never ghosts us
+    if (once) {
+        while (!done) {
+            ui.Poll();
+            drawing.Poll();
+            Sleep(16);
+        }
+        stop = true;
+        while (!finished) {
+            ui.Poll();
+            drawing.Poll();
+            Sleep(16);
+        }
+        worker.join();
+        std::cout << "[run] --once: exiting after auto-execution" << std::endl;
+        return (int)code;
+    }
+    std::cout << "[run] UI + overlay live. Use the Settings unload button or keybind to exit." << std::endl;
+    while (!stop) {
+        ui.Poll();
+        drawing.Poll();
+        Sleep(16);
+    }
+    std::cout << "[run] unload requested; shutting down." << std::endl;
+    while (!done) { ui.Poll(); drawing.Poll(); Sleep(16); }
+    stop = true;
+    while (!finished) { ui.Poll(); drawing.Poll(); Sleep(16); }
+    worker.join();
+    std::cout << "[run] exiting" << std::endl;
+    return (int)code;
+}

@@ -1,0 +1,96 @@
+# Luau Scripting
+
+Luau is the feature scripting language. Put user scripts in `C:/LUSTED/Luas`; direct-child `.lua` and `.luau` files are executed once, in sorted order, after the runtime's standard modules load.
+
+The VM exposes `VERSION_HASH` and `OFFSETS_PATH`. Lua callbacks for UI controls execute on the Luau worker. They receive the control ID as their first argument. Avoid long-running work in callbacks because it delays later Luau events.
+
+## Bootstrap Modules
+
+Before user scripts run, the host loads `helpers.luau`, `ui.luau`, and `drawing.luau` from an `examples` directory beside the executable, one level above it, or under the current working directory. These provide the higher-level `Instance`, `UI`, and `Drawing` tables. The C++ host currently treats them as required. The source checkout used to write this guide does not contain `examples/`, so running the executable requires restoring those standard modules first.
+
+## UI Bindings
+
+The raw functions below are registered by the native runtime. The higher-level `UI` table is supplied by `ui.luau` when that bootstrap module is present.
+
+| Native function | Arguments and behavior |
+| --- | --- |
+| `ui_tab(name)` | Set the tab for subsequently added controls. The `Settings` tab is always rendered last. |
+| `ui_section(name)` | Set the section for subsequently added controls. |
+| `ui_label(text)` | Add a label; returns a numeric control ID. |
+| `ui_set_label(id, text)` | Change label text. |
+| `ui_button(text)` | Add a button; returns an ID. |
+| `ui_pressed(id)` | Consume and return a button or keybind press. |
+| `ui_on_pressed(id, callback)` | Register a callback for a button/keybind press. |
+| `ui_on_changed(id, callback)` | Register a callback for a toggle, slider, dropdown, or input change. |
+| `ui_toggle(label, default)` | Add a checkbox; returns an ID. |
+| `ui_toggle_state(id)` / `ui_set_toggle(id, value)` | Read or set checkbox state. |
+| `ui_slider(label, min, max, default)` | Add an integer slider; returns an ID. Values are clamped to the range. |
+| `ui_slider_value(id)` / `ui_set_slider(id, value)` | Read or set slider value. |
+| `ui_dropdown(label, options, selected)` | Add a dropdown. Selected indices are one-based at the Luau boundary. |
+| `ui_dropdown_value(id)` / `ui_set_dropdown(id, index)` | Read or set its one-based selected index. |
+| `ui_input(label, placeholder)` | Add a text input; returns an ID. |
+| `ui_input_value(id)` / `ui_set_input(id, value)` | Read or set input contents. |
+| `ui_keybind(label, virtualKey)` | Add a keybind using a Windows virtual-key code. |
+| `ui_keybind_value(id)` / `ui_set_keybind(id, virtualKey)` | Read or set the key code. |
+| `ui_depends(controlId, toggleId, expected)` | Show a control only when a toggle has the expected value (true by default). |
+| `ui_config_names()` | Return saved config names as a Luau array. |
+| `ui_save_config(name)` / `ui_load_config(name)` / `ui_delete_config(name)` | Persist, restore, or remove a config. Names allow letters, digits, `_`, and `-`. |
+| `ui_toggle_visible()` | Request a UI visibility toggle on the window thread. |
+| `luau_rescan()` | Rescan the player, refresh offsets if needed, and retarget memory/overlays. Returns a boolean. |
+| `luau_run_file(filename)` | Execute one `.lua`/`.luau` filename from `C:/LUSTED/Luas`; paths containing directories are rejected. |
+| `request_unload()` | Request graceful application shutdown. |
+
+### UI Example
+
+```lua
+ui_tab("Main")
+ui_section("Controls")
+
+local enabled = ui_toggle("Enabled", false)
+local amount = ui_slider("Amount", 0, 100, 25)
+local mode = ui_dropdown("Mode", { "Default", "Alternate" }, 1)
+local apply = ui_button("Apply")
+
+ui_on_changed(enabled, function(id)
+    print("enabled:", ui_toggle_state(id))
+end)
+
+ui_on_pressed(apply, function(id)
+    print("amount:", ui_slider_value(amount))
+    print("mode index:", ui_dropdown_value(mode))
+end)
+```
+
+If the `ui.luau` wrapper is installed, equivalent calls are grouped under `UI`: `UI.Tab`, `UI.Section`, `UI.Label`, `UI.SetLabel`, `UI.Button`, `UI.OnPressed`, `UI.OnChanged`, `UI.Toggle`, `UI.ToggleState`, `UI.SetToggle`, `UI.Slider`, `UI.SliderValue`, `UI.SetSlider`, `UI.Dropdown`, `UI.DropdownValue`, `UI.SetDropdown`, `UI.Input`, `UI.InputValue`, `UI.SetInput`, `UI.Keybind`, `UI.KeybindValue`, `UI.SetKeybind`, `UI.Depends`, config helpers, `UI.Rescan`, `UI.RunFile`, `UI.ToggleVisible`, and `UI.RequestUnload`. Interactive wrapper constructors accept an optional callback as their final argument.
+
+## Memory Functions
+
+The native runtime registers:
+
+- `read_u8`, `read_u16`, `read_u32`, `read_u64`
+- `write_u8`, `write_u16`, `write_u32`, `write_u64`
+- `read_float`, `write_float`
+- `read_string(address, length)`
+- `custom_write(address, byteArray)`
+
+Addresses may be numbers or strings such as `"0x1234"`. Lua numbers are floating-point values; prefer hexadecimal strings for large 64-bit addresses. `read_string` defaults to 128 bytes when length is zero and caps reads at 4096 bytes. `custom_write` expects an array/table of bytes.
+
+## Instance Functions
+
+The host registers `offset`, `get_parent`, `get_children`, `get_name`, `get_classname`, `find_first_child`, `find_first_child_of_class`, `get_descendants`, `wait_for_child`, and `resolve_path`.
+
+Root and player helpers are `get_datamodel`, `set_datamodel`, `is_datamodel`, `get_workspace`, `get_service`, `get_localplayer`, `get_character`, and `get_humanoid`. Property helpers are `get_prop_u32`, `set_prop_u32`, `get_prop_float`, and `set_prop_float`.
+
+When `helpers.luau` is present, it creates `Instance.from(address)` with methods such as `GetParent`, `GetChildren`, `GetDescendants`, `FindFirstChild`, `FindFirstChildOfClass`, `WaitForChild`, `Resolve`, `GetProperty`, and `SetProperty`. It also calls `refresh_game()` to populate `game`, `workspace`, `players`, `localplayer`, `character`, and `humanoid`. These may be nil; check them before use.
+
+```lua
+if game then
+    local camera = workspace and workspace:FindFirstChild("Camera")
+    print("DataModel:", game:addr())
+    print("Camera:", camera and camera.Name)
+else
+    print("No live DataModel")
+end
+```
+
+`GetProperty`/`SetProperty` in the wrapper use the float property bindings. Use `get_prop_u32`/`set_prop_u32` directly for 32-bit integer properties.

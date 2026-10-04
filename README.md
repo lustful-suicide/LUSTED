@@ -1,0 +1,1 @@
+LUSTED is an fast open sourced roblox external with the reason due to monopoly of modern days externals and unoptimized features.

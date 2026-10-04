@@ -1,0 +1,31 @@
+# Runtime Data and Settings
+
+All persistent app data is stored under `C:/LUSTED`.
+
+| Path | Contents |
+| --- | --- |
+| `C:/LUSTED/offsets/version-<hash>/` | `offsets.json`, `offsets.hpp`, `struct.hpp`, and FFlags files for that player version. |
+| `C:/LUSTED/configs/` | JSON UI configurations. |
+| `C:/LUSTED/Luas/` | User `.luau` and `.lua` scripts. |
+
+The offset downloader writes new data to the version-specific directory and reuses valid cached files on later starts. Existing repository-local offsets are not deleted. The cache for the current player version was copied to the new central path during this change.
+
+Auto-run scans direct children of `C:/LUSTED/Luas` only. Files are sorted by path, then executed once after standard modules load. Nested directories are not scanned.
+
+The Settings script runner accepts one `.lua` or `.luau` filename without directory components and loads it from `C:/LUSTED/Luas`.
+
+## Settings Tab
+
+`Settings` is reserved by the UI renderer and always appears after script-created tabs. It contains:
+
+- **Config Manager:** save, load, or delete a config using the entered name. Valid names contain letters, digits, `_`, or `-`, up to 48 characters.
+- **Luau Manager:** run a named `.lua` or `.luau` script from `C:/LUSTED/Luas`. Directory components are rejected.
+- **Rescan Roblox:** find a live Roblox process again, fetch new offsets if its version changed, reload instance caches, and retarget both overlays.
+- **Keybinds:** change the UI visibility and unload keys. Defaults are Home and End.
+- **Status:** displays success or failure for Settings actions.
+
+The panel is an external window. Drag its title strip to move it within the Roblox client area. Press Home to hide or show it. Press End to unload by default. Both keys can be rebound from Settings. The panel shrinks to fit a smaller client area and hides when Roblox is minimized.
+
+## Config Format
+
+Configs are JSON objects in `C:/LUSTED/configs`. Control values are associated with the control type, tab, section, label, and duplicate occurrence. Keep these identifiers stable between runs to preserve mapping. Toggles, sliders, dropdown indices, input strings, and keybind virtual-key codes are persisted. Labels and buttons are not.
