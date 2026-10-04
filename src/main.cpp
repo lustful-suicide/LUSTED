@@ -15,25 +15,6 @@
 #include <vector>
 #include <nlohmann/json.hpp>
 
-static std::filesystem::path FindExamplesDir() {
-    std::vector<std::filesystem::path> candidates;
-    std::vector<wchar_t> pathBuffer(32768);
-    DWORD pathLength = GetModuleFileNameW(nullptr, pathBuffer.data(), (DWORD)pathBuffer.size());
-    if (pathLength && pathLength < pathBuffer.size()) {
-        std::filesystem::path executable(pathBuffer.data(), pathBuffer.data() + pathLength);
-        candidates.push_back(executable.parent_path() / L"examples");
-        candidates.push_back(executable.parent_path().parent_path() / L"examples");
-    }
-    candidates.push_back(std::filesystem::current_path() / L"examples");
-
-    std::error_code ec;
-    for (const auto& candidate : candidates) {
-        if (std::filesystem::exists(candidate / L"ui.luau", ec)) return candidate;
-        ec.clear();
-    }
-    return candidates.empty() ? std::filesystem::path(L"examples") : candidates.front();
-}
-
 static std::vector<std::filesystem::path> CollectLuas(const std::filesystem::path& dir) {
     std::vector<std::filesystem::path> out;
     std::error_code ec;
@@ -126,20 +107,6 @@ int main(int argc, char** argv) {
         if (!luau.Init(versionHash, bundle.offsetsJson.string())) {
             std::cerr << "luau init failed" << std::endl; code = 1; done = true; finished = true; return;
         }
-        const auto examplesDir = FindExamplesDir();
-        for (const auto& name : { L"helpers.luau", L"ui.luau", L"drawing.luau" }) {
-            const auto file = examplesDir / name;
-            if (!std::filesystem::exists(file)) {
-                std::cerr << "[luau] required standard module not found: " << file.string() << std::endl;
-                code = 1; done = true; finished = true; return;
-            }
-            std::cout << "[luau] loading " << file.string() << std::endl;
-            if (!luau.RunFile(file)) {
-                std::cerr << "[luau] standard module failed: " << file.string() << std::endl;
-                code = 1; done = true; finished = true; return;
-            }
-        }
-
         std::filesystem::path autoDir("C:/LUSTED/Luas");
         std::error_code ec;
         std::filesystem::create_directories(autoDir, ec);

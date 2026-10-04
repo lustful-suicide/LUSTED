@@ -5,6 +5,7 @@
 #include "drawing.h"
 #include "roblox_finder.h"
 #include "offsets_fetcher.h"
+#include "luau_stdlib.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -179,6 +180,9 @@ bool LuauManager::Init(const std::string& vh, const std::string& jp) {
     RegisterBindings();
     lua_pushstring(L_, version_.c_str()); lua_setglobal(L_, "VERSION_HASH");
     lua_pushstring(L_, offsetsPath_.c_str()); lua_setglobal(L_, "OFFSETS_PATH");
+    if (!RunString("@builtin/helpers", kInstanceLibrary) ||
+        !RunString("@builtin/ui", kUiLibrary) ||
+        !RunString("@builtin/drawing", kDrawingLibrary)) return false;
     return true;
 }
 

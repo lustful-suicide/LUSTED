@@ -8,13 +8,13 @@ Luau is the feature scripting language. Put user scripts in `C:/LUSTED/Luas`; di
 
 The VM exposes `VERSION_HASH` and `OFFSETS_PATH`. Lua callbacks for UI controls execute on the Luau worker. They receive the control ID as their first argument. Avoid long-running work in callbacks because it delays later Luau events.
 
-## Bootstrap Modules
+## Built-in Libraries
 
-Before user scripts run, the host loads `helpers.luau`, `ui.luau`, and `drawing.luau` from an `examples` directory beside the executable, one level above it, or under the current working directory. These provide the higher-level `Instance`, `UI`, and `Drawing` tables. The C++ host currently treats them as required. The source checkout used to write this guide does not contain `examples/`, so running the executable requires restoring those standard modules first.
+The `Instance`, `UI`, and `Drawing` libraries are compiled into the application and initialized by the Luau runtime before user scripts run. They are available without an `examples/` directory, module files, or `require` calls.
 
 ## UI Bindings
 
-The raw functions below are registered by the native runtime. The higher-level `UI` table is supplied by `ui.luau` when that bootstrap module is present.
+The raw functions below are registered by the native runtime. The higher-level `UI` table is initialized by the embedded standard library.
 
 | Native function | Arguments and behavior |
 | --- | --- |
@@ -65,7 +65,7 @@ ui_on_pressed(apply, function(id)
 end)
 ```
 
-If the `ui.luau` wrapper is installed, equivalent calls are grouped under `UI`: `UI.Tab`, `UI.Section`, `UI.Label`, `UI.SetLabel`, `UI.Button`, `UI.OnPressed`, `UI.OnChanged`, `UI.Toggle`, `UI.ToggleState`, `UI.SetToggle`, `UI.Slider`, `UI.SliderValue`, `UI.SetSlider`, `UI.Dropdown`, `UI.DropdownValue`, `UI.SetDropdown`, `UI.Input`, `UI.InputValue`, `UI.SetInput`, `UI.Keybind`, `UI.KeybindValue`, `UI.SetKeybind`, `UI.Depends`, config helpers, `UI.Rescan`, `UI.RunFile`, `UI.ToggleVisible`, and `UI.RequestUnload`. Interactive wrapper constructors accept an optional callback as their final argument.
+The `UI` wrapper groups these calls under `UI`: `UI.Tab`, `UI.Section`, `UI.Label`, `UI.SetLabel`, `UI.Button`, `UI.OnPressed`, `UI.OnChanged`, `UI.Toggle`, `UI.ToggleState`, `UI.SetToggle`, `UI.Slider`, `UI.SliderValue`, `UI.SetSlider`, `UI.Dropdown`, `UI.DropdownValue`, `UI.SetDropdown`, `UI.Input`, `UI.InputValue`, `UI.SetInput`, `UI.Keybind`, `UI.KeybindValue`, `UI.SetKeybind`, `UI.Depends`, config helpers, `UI.Rescan`, `UI.RunFile`, `UI.ToggleVisible`, and `UI.RequestUnload`. Interactive control constructors accept an optional callback as their final argument.
 
 ## Memory Functions
 
@@ -85,7 +85,7 @@ The host registers `offset`, `get_parent`, `get_children`, `get_name`, `get_clas
 
 Root and player helpers are `get_datamodel`, `set_datamodel`, `is_datamodel`, `get_workspace`, `get_service`, `get_localplayer`, `get_character`, and `get_humanoid`. Property helpers are `get_prop_u32`, `set_prop_u32`, `get_prop_float`, and `set_prop_float`.
 
-When `helpers.luau` is present, it creates `Instance.from(address)` with methods such as `GetParent`, `GetChildren`, `GetDescendants`, `FindFirstChild`, `FindFirstChildOfClass`, `WaitForChild`, `Resolve`, `GetProperty`, and `SetProperty`. It also calls `refresh_game()` to populate `game`, `workspace`, `players`, `localplayer`, `character`, and `humanoid`. These may be nil; check them before use.
+The embedded `Instance` library provides `Instance.from(address)` with methods such as `GetParent`, `GetChildren`, `GetDescendants`, `FindFirstChild`, `FindFirstChildOfClass`, `WaitForChild`, `Resolve`, `GetProperty`, and `SetProperty`. It calls `refresh_game()` during initialization to populate `game`, `workspace`, `players`, `localplayer`, `character`, and `humanoid`. These may be nil; check them before use.
 
 ```lua
 if game then

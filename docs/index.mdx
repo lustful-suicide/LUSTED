@@ -30,10 +30,10 @@ Run `build/lusted.exe`. `--help` prints command-line help. `--once` initializes,
 2. Select the version hash and fetch or reuse its offsets.
 3. Initialize the external overlay windows and attach to the process when available.
 4. Create the Luau VM and register native globals.
-5. Load the three standard modules: `helpers.luau`, `ui.luau`, and `drawing.luau`.
+5. Initialize the built-in `Instance`, `UI`, and `Drawing` Luau libraries embedded in the executable.
 6. Execute `.lua` and `.luau` files directly inside `C:/LUSTED/Luas`, sorted alphabetically.
 
-Startup stops with a clear error if one of the required standard modules is missing. The source checkout used for this documentation currently has no `examples/` directory, so restore those modules in a location searched by the executable before running it.
+The standard libraries do not require external files or an `examples/` directory. User scripts can call `UI.*`, `Drawing.*`, and the `Instance` helpers as soon as auto-execution begins.
 
 ## Navigation
 
