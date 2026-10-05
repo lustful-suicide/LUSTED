@@ -1,6 +1,31 @@
 #pragma once
 
 inline constexpr char kInstanceLibrary[] = R"LUA(
+local Vector3Meta = {}
+Vector3Meta.__index = Vector3Meta
+Vector3Meta.__tostring = function(v)
+    return string.format("%.2f, %.2f, %.2f", v.X, v.Y, v.Z)
+end
+Vector3Meta.__add = function(a, b) return Vector3(a.X + b.X, a.Y + b.Y, a.Z + b.Z) end
+Vector3Meta.__sub = function(a, b) return Vector3(a.X - b.X, a.Y - b.Y, a.Z - b.Z) end
+Vector3Meta.__mul = function(a, b)
+    if type(b) == "number" then return Vector3(a.X * b, a.Y * b, a.Z * b) end
+    return Vector3(a.X * b.X, a.Y * b.Y, a.Z * b.Z)
+end
+Vector3Meta.__div = function(a, b)
+    if type(b) == "number" then return Vector3(a.X / b, a.Y / b, a.Z / b) end
+    return Vector3(a.X / b.X, a.Y / b.Y, a.Z / b.Z)
+end
+Vector3Meta.__eq = function(a, b) return a.X == b.X and a.Y == b.Y and a.Z == b.Z end
+Vector3Meta.__len = function(v) return math.sqrt(v.X * v.X + v.Y * v.Y + v.Z * v.Z) end
+Vector3Meta.Magnitude = function(self) return math.sqrt(self.X * self.X + self.Y * self.Y + self.Z * self.Z) end
+Vector3Meta.Dot = function(self, other) return self.X * other.X + self.Y * other.Y + self.Z * other.Z end
+Vector3Meta.Unit = function(self)
+    local m = self:Magnitude()
+    if m == 0 then return Vector3(0, 0, 0) end
+    return Vector3(self.X / m, self.Y / m, self.Z / m)
+end
+
 local Instance = {}
 Instance.__index = Instance
 
@@ -61,13 +86,22 @@ function Instance:Resolve(path)
 end
 
 function Instance:GetProperty(className, memberName)
-    return get_prop_float(self._address, className, memberName)
+    return get_prop(self._address, className or self.ClassName, memberName)
 end
 
 function Instance:SetProperty(className, memberName, value)
-    return set_prop_float(self._address, className, memberName, value)
+    return set_prop(self._address, className or self.ClassName, memberName, value)
 end
 
+function Instance:HasProperty(memberName)
+    return has_prop(self.ClassName, memberName)
+end
+
+function Instance:PropOffset(memberName)
+    return prop_offset(self.ClassName, memberName)
+end
+
+-- property -> child -> nil
 Instance.__index = function(self, key)
     local method = rawget(Instance, key)
     if method ~= nil then return method end
@@ -75,8 +109,16 @@ Instance.__index = function(self, key)
     if key == "ClassName" then return get_classname(self._address) end
     if key == "Parent" then return self:GetParent() end
     if key == "Children" then return self:GetChildren() end
-    local address = find_first_child(self._address, key)
-    return address and Instance.from(address) or nil
+    local address = self._address
+    local value = get_prop(address, get_classname(address), key)
+    if value ~= nil then
+        if type(value) == "string" and value:match("^0x") then
+            return Instance.from(value)
+        end
+        return value
+    end
+    local child = find_first_child(address, key)
+    return child and Instance.from(child) or nil
 end
 
 function refresh_game()
@@ -105,6 +147,32 @@ function set_walkspeed(value, instance)
     return instance and set_prop_float(instance:addr(), "Humanoid", "Walkspeed", value) or false
 end
 
+-- CFrame block: {r00..r22, px, py, pz}
+function get_cframe(instance)
+    if not instance then return nil end
+    local addr = instance.addr and instance:addr() or instance
+    return raw_get_cframe(addr, get_classname(addr))
+end
+
+function set_cframe(instance, cf)
+    if not instance or type(cf) ~= "table" then return false end
+    local addr = instance.addr and instance:addr() or instance
+    return raw_set_cframe(addr, get_classname(addr), cf)
+end
+
+-- position-only write; keeps the current rotation block intact
+function set_position(instance, x, y, z)
+    if not instance then return false end
+    local addr = instance.addr and instance:addr() or instance
+    return set_prop(addr, get_classname(addr), "Position", { X = x, Y = y, Z = z })
+end
+
+function get_position(instance)
+    if not instance then return nil end
+    local addr = instance.addr and instance:addr() or instance
+    return get_prop(addr, get_classname(addr), "Position")
+end
+
 function set_jumppower(value, instance)
     instance = instance or humanoid
     return instance and set_prop_float(instance:addr(), "Humanoid", "JumpPower", value) or false
@@ -112,7 +180,17 @@ end
 
 function get_rootpart(instance)
     instance = instance or character
-    return instance and instance:FindFirstChild("HumanoidRootPart") or nil
+    if instance then
+        local part = instance:FindFirstChild("HumanoidRootPart")
+        if part then return part end
+        -- R6 nests the root part one level down under Torso.
+        for _, limb in ipairs(instance:GetChildren()) do
+            local nested = limb:FindFirstChild("HumanoidRootPart")
+            if nested then return nested end
+        end
+    end
+    local address = raw_get_rootpart()
+    return address and Instance.from(address) or nil
 end
 
 function print_tree(instance, depth)
@@ -124,6 +202,51 @@ function print_tree(instance, depth)
         for _, child in ipairs(node:GetChildren()) do visit(child, level + 1) end
     end
     if instance then visit(instance, 0) end
+end
+
+-- Vector3 helpers (returned tables from get_prop)
+function Vector3(x, y, z)
+    return setmetatable({ X = x or 0, Y = y or 0, Z = z or 0 }, Vector3Meta)
+end
+function IsVector3(value)
+    return type(value) == "table" and getmetatable(value) == Vector3Meta
+end
+
+function get_players()
+    local result = {}
+    for _, address in ipairs(raw_get_players() or {}) do
+        result[#result + 1] = Instance.from(address)
+    end
+    return result
+end
+
+function get_player_count()
+    return raw_get_player_count()
+end
+
+function player_by_name(target)
+    target = tostring(target):lower()
+    for _, player in ipairs(get_players()) do
+        if tostring(player.Name):lower() == target then return player end
+    end
+    return nil
+end
+
+-- HumanoidRootPart of any player (or a Character model).
+function get_player_root(target)
+    local player = type(target) == "string" and player_by_name(target) or target
+    if not player then return nil end
+    local char = player.Character or player.ModelInstance
+    if not char then return nil end
+    return get_rootpart(char)
+end
+
+function refresh_index(force)
+    return raw_refresh_index(force == true)
+end
+
+function index_stats()
+    return raw_index_stats()
 end
 
 refresh_game()

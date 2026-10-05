@@ -16,6 +16,24 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT msg
 static UiManager* g_ui = nullptr;
 struct FindCtx { DWORD pid; HWND hwnd; };
 
+// Class/title are process-lifetime strings; nothing outside this file looks
+// them up by name (FindCb matches on pid only), so they can differ per run.
+static const char* RandomClassName() {
+    static std::string s = [] {
+        char b[48];
+        snprintf(b, sizeof(b), "Wnd%08X%04X",
+                 (unsigned)(GetTickCount64() & 0xFFFFFFFF),
+                 (unsigned)(GetCurrentProcessId() & 0xFFFF));
+        return std::string(b);
+    }();
+    return s.c_str();
+}
+static std::string RandomWindowTitle() {
+    char b[48];
+    snprintf(b, sizeof(b), "Roblox%08X", (unsigned)(GetTickCount64() & 0xFFFFFFFF));
+    return std::string(b);
+}
+
 static std::filesystem::path ConfigDirectory() {
     return std::filesystem::path("C:/LUSTED/configs");
 }
@@ -275,6 +293,7 @@ bool UiManager::Init(const std::string& title, DWORD pid) {
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad; // XInput throws with no pad
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
     style.WindowRounding = 5.0f;
@@ -369,7 +388,11 @@ void UiManager::Poll() {
         }
         keyStatesPrimed_ = true;
     }
-    if (visible_.load() && imguiReady_ && !IsIconic(hwnd_)) Render();
+    if (visible_.load() && imguiReady_ && !IsIconic(hwnd_)) {
+        // ImGui's Win32 backend calls XInput, which throws when no controller
+        // is present (0xc06d007e). Never let that kill the process.
+        try { Render(); } catch (...) { imguiReady_ = imguiReady_; }
+    }
 }
 
 void UiManager::SetVisible(bool visible) {

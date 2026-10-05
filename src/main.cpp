@@ -5,6 +5,7 @@
 #include "ui.h"
 #include "drawing.h"
 #include "luau_manager.h"
+#include "log.h"
 #include <iostream>
 #include <filesystem>
 #include <fstream>
@@ -38,6 +39,7 @@ static bool LooksLikeHash(const std::string& s) {
 }
 
 int main(int argc, char** argv) {
+    setvbuf(stdout, nullptr, _IOLBF, 0); // keep prints visible if we crash
     std::cout << "Lusted external -- finder + offsets + custom-write + luau (auto)" << std::endl;
 
     bool once = false;
@@ -99,7 +101,8 @@ int main(int argc, char** argv) {
             std::cerr << "[warn] some downloads failed. Check " << bundle.dir.string() << std::endl;
 
         Memory mem;
-        if (pid && mem.Attach(pid)) std::cout << "[memory] attached (CustomWrite NT path)" << std::endl;
+        if (pid && mem.Attach(pid))
+            std::cout << "[memory] attached (CustomWrite NT path)" << std::endl;
         else std::cout << "[memory] no live attach; helpers return nil until Roblox runs." << std::endl;
 
         InstanceStore inst(&mem);
@@ -107,16 +110,28 @@ int main(int argc, char** argv) {
         if (!luau.Init(versionHash, bundle.offsetsJson.string())) {
             std::cerr << "luau init failed" << std::endl; code = 1; done = true; finished = true; return;
         }
+        LustedLog("luau init ok");
+        // Index after Init: Load() resets the snapshot, so building earlier
+        // would leave the store with an empty index.
+        if (pid && mem.IsOpen()) {
+            inst.BuildIndex(pid, true);
+            LustedLogf("index build done ready=%d", inst.IsIndexReady() ? 1 : 0);
+        }
         std::filesystem::path autoDir("C:/LUSTED/Luas");
         std::error_code ec;
         std::filesystem::create_directories(autoDir, ec);
         auto luas = CollectLuas(autoDir);
         std::cout << "[auto] " << luas.size() << " file(s) in " << autoDir.string() << std::endl;
+        LustedLogf("auto-exec start files=%zu", luas.size());
         for (auto& f : luas) {
             std::cout << "[auto] running " << f.string() << std::endl;
-            if (!luau.RunFile(f)) std::cerr << "[auto] failed: " << f.string() << std::endl;
+            LustedLogf("script start %s", f.filename().string().c_str());
+            bool ok = luau.RunFile(f);
+            LustedLogf("script end %s ok=%d", f.filename().string().c_str(), ok ? 1 : 0);
+            if (!ok) std::cerr << "[auto] failed: " << f.string() << std::endl;
         }
         std::cout << "[run] auto-execution done." << std::endl;
+        LustedLog("auto-exec done");
         done = true;
         while (!once && !stop) {
             luau.Poll();
@@ -130,6 +145,7 @@ int main(int argc, char** argv) {
         while (!done) {
             ui.Poll();
             drawing.Poll();
+            fflush(stdout);
             Sleep(16);
         }
         stop = true;

@@ -1,4 +1,5 @@
 #include "memory.h"
+#include "log.h"
 #include <iostream>
 
 typedef LONG NTSTATUS;
@@ -24,25 +25,37 @@ static bool ResolveNt() {
 bool Memory::Attach(DWORD pid) {
     Detach();
     if (!ResolveNt()) return false;
-    HANDLE h = OpenProcess(PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION |
-                           PROCESS_QUERY_INFORMATION, FALSE, pid);
+    // Read-only rights for the handle we hold for the process lifetime.
+    // Write rights are taken and dropped inside CustomWrite instead, so the
+    // process never sits on a VM_WRITE handle while idle.
+    HANDLE h = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, pid);
     if (!h) return false;
     hProc_ = h; pid_ = pid;
+    LustedLogf("attach pid=%lu rights=READ|QUERY", (unsigned long)pid);
     return true;
 }
 
 void Memory::Detach() {
-    if (hProc_) { CloseHandle(hProc_); hProc_ = nullptr; pid_ = 0; }
+    if (hProc_) { CloseHandle(hProc_); hProc_ = nullptr; pid_ = 0; LustedLog("detach"); }
 }
 
 bool Memory::CustomWrite(uintptr_t address, const void* data, size_t size) {
     if (!IsOpen() || !address || !data || !size) return false;
     if (!ResolveNt()) return false;
+
+    // Write rights are scoped to this call: open, use, drop.
+    HANDLE hw = OpenProcess(PROCESS_VM_WRITE | PROCESS_VM_OPERATION, FALSE, pid_);
+    if (!hw) {
+        LustedLogf("write OPENFAIL addr=0x%llx size=%zu", (unsigned long long)address, size);
+        return false;
+    }
+
+    bool ok = false;
     PVOID base = (PVOID)address;
     SIZE_T region = size;
     ULONG oldProt = 0;
     // 1) Make writable (no WriteProcessMemory anywhere in this binary path).
-    NTSTATUS st = pNtProtect(hProc_, &base, &region, PAGE_EXECUTE_READWRITE, &oldProt);
+    NTSTATUS st = pNtProtect(hw, &base, &region, PAGE_EXECUTE_READWRITE, &oldProt);
     if (!NT_SUCCESS(st)) {
         // Try without protect change (already writable pages).
         oldProt = 0; region = 0;
@@ -52,7 +65,7 @@ bool Memory::CustomWrite(uintptr_t address, const void* data, size_t size) {
     const uint8_t* src = (const uint8_t*)data;
     while (done < size) {
         SIZE_T w = 0;
-        st = pNtWrite(hProc_, (PVOID)(address + done), (PVOID)(src + done), size - done, &w);
+        st = pNtWrite(hw, (PVOID)(address + done), (PVOID)(src + done), size - done, &w);
         if (!NT_SUCCESS(st) || w == 0) break;
         done += w;
         if (w != size - (done - w) && w == 0) break;
@@ -60,14 +73,23 @@ bool Memory::CustomWrite(uintptr_t address, const void* data, size_t size) {
     // 3) Restore protection.
     if (region) {
         PVOID rb = (PVOID)address; SIZE_T rs = size; ULONG tmp = 0;
-        pNtProtect(hProc_, &rb, &rs, oldProt ? oldProt : PAGE_EXECUTE_READ, &tmp);
+        pNtProtect(hw, &rb, &rs, oldProt ? oldProt : PAGE_EXECUTE_READ, &tmp);
     }
-    FlushInstructionCache(hProc_, (LPCVOID)address, size);
-    if (done != size) return false;
-    // 4) Verify by reading back.
+    FlushInstructionCache(hw, (LPCVOID)address, size);
+    CloseHandle(hw);
+
+    if (done != size) {
+        LustedLogf("write SHORT addr=0x%llx want=%zu got=%zu",
+                   (unsigned long long)address, size, done);
+        return false;
+    }
+    // 4) Verify by reading back through the persistent read handle.
     std::vector<uint8_t> back(size);
     if (!CustomRead(address, back.data(), size)) return false;
-    return memcmp(back.data(), data, size) == 0;
+    ok = memcmp(back.data(), data, size) == 0;
+    LustedLogf("write addr=0x%llx size=%zu verify=%s",
+               (unsigned long long)address, size, ok ? "ok" : "MISMATCH");
+    return ok;
 }
 
 bool Memory::CustomRead(uintptr_t address, void* out, size_t size) {

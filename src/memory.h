@@ -4,7 +4,7 @@
 #include <cstddef>
 #include <vector>
 
-// Custom memory engine. Never links/calls WriteProcessMemory.
+// Custom memory engine. Never links/calls WriteProcessMemory. <--- THIS IS A LIE
 // Uses dynamically-resolved NTAPI (NtWriteVirtualMemory +
 // NtProtectVirtualMemory) with protect-restore + verify.
 class Memory {
