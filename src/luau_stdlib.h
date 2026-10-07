@@ -62,6 +62,11 @@ end
 function Instance:FindFirstChild(name, recursive)
     if not recursive then
         local address = find_first_child(self._address, name)
+        if address == nil and type(name) == "string" then
+            -- Workspace.<CharacterName> idiom (see __index fallback below).
+            local chAddr = get_character()
+            if chAddr ~= nil and get_name(chAddr) == name then address = chAddr end
+        end
         return address and Instance.from(address) or nil
     end
     for _, descendant in ipairs(self:GetDescendants()) do
@@ -77,6 +82,16 @@ end
 
 function Instance:WaitForChild(name, timeout)
     local address = wait_for_child(self._address, name, timeout or 5000)
+    return address and Instance.from(address) or nil
+end
+
+function Instance:GetService(name)
+    if type(name) ~= "string" or name == "" then return nil end
+    local address = find_first_child(self._address, name)
+    if address == nil then
+        -- services sometimes carry a versioned display name; fall back to class
+        address = find_first_child_of_class(self._address, name)
+    end
     return address and Instance.from(address) or nil
 end
 
@@ -101,6 +116,21 @@ function Instance:PropOffset(memberName)
     return prop_offset(self.ClassName, memberName)
 end
 
+-- Instances print as a name/class rather than "table: 0x...", so a failed
+-- property read is visible instead of looking like an unresolved instance.
+Instance.__tostring = function(self)
+    local a = self._address
+    if a == nil then return "Instance<nil>" end
+    local okN, name = pcall(get_name, a)
+    local okC, cls = pcall(get_classname, a)
+    name = (okN and type(name) == "string") and name or ""
+    cls = (okC and type(cls) == "string") and cls or ""
+    if name == "" and cls == "" then return "Instance(" .. tostring(a) .. ")" end
+    if cls == "" then return name end
+    if name == "" then return cls end
+    return name .. " [" .. cls .. "]"
+end
+
 -- property -> child -> nil
 Instance.__index = function(self, key)
     local method = rawget(Instance, key)
@@ -110,6 +140,28 @@ Instance.__index = function(self, key)
     if key == "Parent" then return self:GetParent() end
     if key == "Children" then return self:GetChildren() end
     local address = self._address
+    -- LocalPlayer is authoritative via the dedicated binding (the generic
+    -- property path can mistype it on some dumps and return a boolean).
+    if key == "LocalPlayer" and get_classname(address) == "Players" then
+        local lp = get_localplayer()
+        if type(lp) == "string" and lp:match("^0x") then
+            return Instance.from(lp)
+        end
+        return nil
+    end
+    -- Character is a pointer property stored as ModelInstance in the dump:
+    -- resolve the alias here so player.Character never needs a tree walk
+    -- (it is a property, not a child; child lookup below would miss it).
+    if key == "Character" then
+        local direct = get_prop(address, get_classname(address), "Character")
+        if type(direct) == "string" and direct:match("^0x") then
+            return Instance.from(direct)
+        end
+        local model = get_prop(address, get_classname(address), "ModelInstance")
+        if type(model) == "string" and model:match("^0x") then
+            return Instance.from(model)
+        end
+    end
     local value = get_prop(address, get_classname(address), key)
     if value ~= nil then
         if type(value) == "string" and value:match("^0x") then
@@ -117,7 +169,27 @@ Instance.__index = function(self, key)
         end
         return value
     end
+    -- Misses stay on the full lookup: the startup index is gated complete,
+    -- so a miss here is either streaming in (sweep-gated, throttled to one
+    -- pass per window shared across missers) or genuinely absent.
     local child = find_first_child(address, key)
+    if child == nil and type(key) == "string" then
+        -- Workspace.<CharacterName> idiom for speed scripts
+        -- (workspace.char.Humanoid): the character Model is transitionally
+        -- unparented while dying/streaming but its pointer stays live, so a
+        -- pure tree lookup misses what get_character still resolves.
+        local chAddr = get_character()
+        if chAddr ~= nil and get_name(chAddr) == key then
+            child = chAddr
+        elseif key == "Humanoid" then
+            -- char.Humanoid while the Humanoid hasn't streamed in as a child:
+            -- hand back the live Humanoid when self IS the character.
+            local hAddr = get_humanoid()
+            if hAddr ~= nil and chAddr ~= nil and address == chAddr then
+                child = hAddr
+            end
+        end
+    end
     return child and Instance.from(child) or nil
 end
 
@@ -144,7 +216,9 @@ end
 
 function set_walkspeed(value, instance)
     instance = instance or humanoid
-    return instance and set_prop_float(instance:addr(), "Humanoid", "Walkspeed", value) or false
+    if not instance then return false end
+    -- the raw setter mirrors Walkspeed -> WalkspeedCheck, so one call covers both
+    return set_prop_float(instance:addr(), "Humanoid", "Walkspeed", value)
 end
 
 -- CFrame block: {r00..r22, px, py, pz}
@@ -175,7 +249,9 @@ end
 
 function set_jumppower(value, instance)
     instance = instance or humanoid
-    return instance and set_prop_float(instance:addr(), "Humanoid", "JumpPower", value) or false
+    if not instance then return false end
+    -- mirrored to JumpHeight by the raw setter
+    return set_prop_float(instance:addr(), "Humanoid", "JumpPower", value)
 end
 
 function get_rootpart(instance)
@@ -236,9 +312,22 @@ end
 function get_player_root(target)
     local player = type(target) == "string" and player_by_name(target) or target
     if not player then return nil end
-    local char = player.Character or player.ModelInstance
+    -- ModelInstance is the stored pointer (instant); Character is derived, so
+    -- resolving it first costs a full tree walk for the same answer.
+    local char = player.ModelInstance or player.Character
     if not char then return nil end
     return get_rootpart(char)
+end
+
+-- Copy a target's HumanoidRootPart CFrame onto the local one.
+function tp_to(target)
+    local dest = get_player_root(target)
+    if not dest then return false, "no target root" end
+    local mine = get_rootpart(character)
+    if not mine then return false, "no local root" end
+    local cf = get_cframe(dest)
+    if not cf then return false, "no target cframe" end
+    return set_cframe(mine, cf)
 end
 
 function refresh_index(force)

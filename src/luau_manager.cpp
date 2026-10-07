@@ -10,11 +10,14 @@
 #include <fstream>
 #include <sstream>
 #include <cstdio>
+#include <cctype>
 #include <vector>
 
 #include "lua.h"
 #include "lualib.h"
 #include "Luau/Compiler.h"
+#include <thread>
+#include <chrono>
 
 static Memory* g_mem = nullptr;
 static InstanceStore* g_inst = nullptr;
@@ -108,6 +111,10 @@ static int l_find_first_child(lua_State* L) {
     PushAddr(L, g_inst ? g_inst->FindFirstChild(ToAddr(L,1), lua_tostring(L,2) ? lua_tostring(L,2) : "") : 0);
     return 1;
 }
+static int l_find_child_cached(lua_State* L) {
+    PushAddr(L, g_inst ? g_inst->FindChildCached(ToAddr(L,1), lua_tostring(L,2) ? lua_tostring(L,2) : "") : 0);
+    return 1;
+}
 static int l_find_first_child_of_class(lua_State* L) {
     PushAddr(L, g_inst ? g_inst->FindFirstChildOfClass(ToAddr(L,1), lua_tostring(L,2) ? lua_tostring(L,2) : "") : 0);
     return 1;
@@ -164,10 +171,11 @@ static int l_get_prop_float(lua_State* L) {
 }
 static int l_set_prop_float(lua_State* L) {
     if (!g_inst || !g_mem) { lua_pushboolean(L,0); return 1; }
-    auto o = g_inst->OffsetOf(lua_tostring(L,2) ? lua_tostring(L,2) : "", lua_tostring(L,3) ? lua_tostring(L,3) : "");
-    if (!o) { lua_pushboolean(L,0); return 1; }
-    float v = (float)lua_tonumber(L,4);
-    lua_pushboolean(L, g_mem->Write<float>(ToAddr(L,1)+(uintptr_t)*o, v));
+    uintptr_t addr = ToAddr(L, 1);
+    std::string cls = lua_tostring(L, 2) ? lua_tostring(L, 2) : "";
+    std::string member = lua_tostring(L, 3) ? lua_tostring(L, 3) : "";
+    float v = (float)lua_tonumber(L, 4);
+    lua_pushboolean(L, g_inst->WritePropFloatMirrored(addr, cls, member, v));
     return 1;
 }
 
@@ -276,6 +284,16 @@ static int l_set_prop(lua_State* L) {
     uintptr_t addr = ToAddr(L, 1);
     std::string cls = lua_tostring(L, 2) ? lua_tostring(L, 2) : "";
     std::string member = lua_tostring(L, 3) ? lua_tostring(L, 3) : "";
+    { // Replication-safe mirror: keep WalkSpeed/WalkSpeedCheck and JumpPower/JumpHeight in sync.
+        std::string lc = cls, lm = member;
+        for (auto& c : lc) c = (char)tolower((unsigned char)c);
+        for (auto& c : lm) c = (char)tolower((unsigned char)c);
+        if (lc == "humanoid" && (lm == "walkspeed" || lm == "walkspeedcheck" || lm == "jumppower" || lm == "jumpheight") && !lua_istable(L, 4)) {
+            float fv = (float)lua_tonumber(L, 4);
+            lua_pushboolean(L, g_inst->WritePropFloatMirrored(addr, cls, member, fv));
+            return 1;
+        }
+    }
     PropInfo p = g_inst->ResolveProp(addr, cls, member);
     if (!p.ok()) { lua_pushboolean(L, 0); return 1; }
     uintptr_t fieldBase = g_inst->PropBase(p, addr);
@@ -404,7 +422,9 @@ bool LuauManager::Init(const std::string& vh, const std::string& jp) {
     version_ = vh; offsetsPath_ = jp;
     g_mem = mem_; g_inst = inst_; g_pid = pidOut_; g_ui = ui_; g_dr = dr_;
     g_luau = this;
-    if (g_inst) g_inst->Load(jp);
+    // main() loads the table before the index thread starts; reloading here
+    // would clear it (and the snapshot) under a running pass.
+    if (g_inst && !g_inst->IsLoaded()) g_inst->Load(jp);
     L_ = luaL_newstate();
     if (!L_) return false;
     luaL_openlibs(L_);
@@ -437,6 +457,7 @@ void LuauManager::RegisterBindings() {
     lua_pushcfunction(L_, &l_get_name, "get_name"); lua_setglobal(L_, "get_name");
     lua_pushcfunction(L_, &l_get_class, "get_classname"); lua_setglobal(L_, "get_classname");
     lua_pushcfunction(L_, &l_find_first_child, "find_first_child"); lua_setglobal(L_, "find_first_child");
+    lua_pushcfunction(L_, &l_find_child_cached, "find_child_cached"); lua_setglobal(L_, "find_child_cached");
     lua_pushcfunction(L_, &l_direct_child, "direct_child_by_name"); lua_setglobal(L_, "direct_child_by_name");
     lua_pushcfunction(L_, &l_find_first_child_of_class, "find_first_child_of_class"); lua_setglobal(L_, "find_first_child_of_class");
     lua_pushcfunction(L_, &l_get_descendants, "get_descendants"); lua_setglobal(L_, "get_descendants");
@@ -804,6 +825,13 @@ bool LuauManager::RunAutoFile(const std::string& filename) {
     return RunFile(std::filesystem::path("C:/LUSTED/Luas") / leaf);
 }
 bool LuauManager::RescanRoblox() {
+    // A background index pass may be merging while this swaps the store;
+    // cancelling first keeps the move from racing the merge.
+    if (inst_) {
+        inst_->RequestIndexCancel();
+        while (inst_->IsIndexBuilding())
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
     auto install = FindRobloxPlayer();
     if (!install || !install->pid) return false;
     const DWORD newPid = install->pid;

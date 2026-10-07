@@ -36,12 +36,21 @@ bool Memory::Attach(DWORD pid) {
 }
 
 void Memory::Detach() {
-    if (hProc_) { CloseHandle(hProc_); hProc_ = nullptr; pid_ = 0; LustedLog("detach"); }
+    if (hProc_) { CloseHandle(hProc_); hProc_ = nullptr; pid_ = 0; LustedLog("detach"); LustedLogFlush(); }
 }
 
 bool Memory::CustomWrite(uintptr_t address, const void* data, size_t size) {
     if (!IsOpen() || !address || !data || !size) return false;
     if (!ResolveNt()) return false;
+
+    // Phase timers: anything over a millisecond is logged with its breakdown so
+    // the slow phase is named instead of guessed at.
+    LARGE_INTEGER fr, ta, tb, tc, td, te;
+    QueryPerformanceFrequency(&fr);
+    const auto us = [&](LARGE_INTEGER a, LARGE_INTEGER b) {
+        return (double)(b.QuadPart - a.QuadPart) * 1e6 / (double)fr.QuadPart;
+    };
+    QueryPerformanceCounter(&ta);
 
     // Write rights are scoped to this call: open, use, drop.
     HANDLE hw = OpenProcess(PROCESS_VM_WRITE | PROCESS_VM_OPERATION, FALSE, pid_);
@@ -50,46 +59,64 @@ bool Memory::CustomWrite(uintptr_t address, const void* data, size_t size) {
         return false;
     }
 
-    bool ok = false;
-    PVOID base = (PVOID)address;
-    SIZE_T region = size;
-    ULONG oldProt = 0;
-    // 1) Make writable (no WriteProcessMemory anywhere in this binary path).
-    NTSTATUS st = pNtProtect(hw, &base, &region, PAGE_EXECUTE_READWRITE, &oldProt);
-    if (!NT_SUCCESS(st)) {
-        // Try without protect change (already writable pages).
-        oldProt = 0; region = 0;
+    // No VirtualQueryEx here: against a live target it measured 1.3-26 ms per
+    // call, which dwarfs the write itself. NtWriteVirtualMemory is tried first
+    // and the protect/restore dance only runs when it comes up short - that is
+    // also exactly when the page is a non-writable (code) page, so the cache
+    // flush below lands where it belongs.
+    auto writeOnce = [&](size_t from) -> SIZE_T {
+        const uint8_t* src = (const uint8_t*)data;
+        SIZE_T total = 0;
+        while (from + total < size) {
+            SIZE_T w = 0;
+            NTSTATUS st = pNtWrite(hw, (PVOID)(address + from + total),
+                                   (PVOID)(src + from + total), size - from - total, &w);
+            if (!NT_SUCCESS(st) || w == 0) break;
+            total += w;
+        }
+        return total;
+    };
+
+    SIZE_T done = writeOnce(0);
+    bool didProtect = false;
+    if (done != size) {
+        PVOID base = (PVOID)address;
+        SIZE_T region = size;
+        ULONG oldProt = 0;
+        if (NT_SUCCESS(pNtProtect(hw, &base, &region, PAGE_EXECUTE_READWRITE, &oldProt))) {
+            const SIZE_T retry = writeOnce(done);
+            done += retry;
+            PVOID rb = (PVOID)address; SIZE_T rs = size; ULONG tmp = 0;
+            pNtProtect(hw, &rb, &rs, oldProt ? oldProt : PAGE_EXECUTE_READ, &tmp);
+            FlushInstructionCache(hw, (LPCVOID)address, size);
+            didProtect = true;
+        }
     }
-    // 2) Raw NT write in small chunks so partial-write failures are visible.
-    SIZE_T done = 0;
-    const uint8_t* src = (const uint8_t*)data;
-    while (done < size) {
-        SIZE_T w = 0;
-        st = pNtWrite(hw, (PVOID)(address + done), (PVOID)(src + done), size - done, &w);
-        if (!NT_SUCCESS(st) || w == 0) break;
-        done += w;
-        if (w != size - (done - w) && w == 0) break;
-    }
-    // 3) Restore protection.
-    if (region) {
-        PVOID rb = (PVOID)address; SIZE_T rs = size; ULONG tmp = 0;
-        pNtProtect(hw, &rb, &rs, oldProt ? oldProt : PAGE_EXECUTE_READ, &tmp);
-    }
-    FlushInstructionCache(hw, (LPCVOID)address, size);
     CloseHandle(hw);
+    QueryPerformanceCounter(&tb);
 
     if (done != size) {
         LustedLogf("write SHORT addr=0x%llx want=%zu got=%zu",
                    (unsigned long long)address, size, done);
         return false;
     }
-    // 4) Verify by reading back through the persistent read handle.
+    // Verify by reading back through the persistent read handle.
     std::vector<uint8_t> back(size);
-    if (!CustomRead(address, back.data(), size)) return false;
-    ok = memcmp(back.data(), data, size) == 0;
-    LustedLogf("write addr=0x%llx size=%zu verify=%s",
-               (unsigned long long)address, size, ok ? "ok" : "MISMATCH");
-    return ok;
+    const bool verified = CustomRead(address, back.data(), size) &&
+                          memcmp(back.data(), data, size) == 0;
+    QueryPerformanceCounter(&tc);
+
+    char line[256];
+    snprintf(line, sizeof(line), "write addr=0x%llx size=%zu verify=%s mode=%s",
+             (unsigned long long)address, size, verified ? "ok" : "MISMATCH",
+             didProtect ? "protect" : "direct");
+    LustedLog(line);
+    QueryPerformanceCounter(&td);
+    const double wallUs = us(ta, td);
+    if (wallUs > 1000.0)
+        LustedLogf("SLOW write addr=0x%llx core=%.0fus (write=%.0f verify=%.0f) log=%.0f",
+                   (unsigned long long)address, us(ta, tb), us(tb, tc), us(tc, td));
+    return verified;
 }
 
 bool Memory::CustomRead(uintptr_t address, void* out, size_t size) {

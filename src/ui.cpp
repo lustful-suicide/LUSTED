@@ -326,6 +326,12 @@ bool UiManager::Init(const std::string& title, DWORD pid) {
         return false;
     }
     imguiReady_ = true;
+    // The window gets a real control immediately so it paints and docks while
+    // the worker is still fetching offsets and building the index. The Lua
+    // stdlib appends the rest of Settings/Status below this label.
+    currentTab_ = "Settings";
+    currentSection_ = "Status";
+    statusCtlId_ = AddLabel("Starting…");
     ShowWindow(hwnd_, SW_HIDE);
     return true;
 }
@@ -352,6 +358,10 @@ void UiManager::Poll() {
         DispatchMessageA(&msg);
     }
     DockToRoblox();
+    // Native toggle/unload live on this thread: the Lua callbacks for the same
+    // keys only run when the worker reaches its Poll loop (after index + auto
+    // exec), which is why Home/End used to feel dead during startup.
+    bool wantToggle = false, wantUnload = false;
     {
         std::lock_guard<std::mutex> lk(mtx_);
         std::array<bool, 256> keysToPoll{};
@@ -361,6 +371,10 @@ void UiManager::Poll() {
             if (item.second.binding) captureKey = true;
             else if (item.second.key > 0 && item.second.key < 256) keysToPoll[item.second.key] = true;
         }
+        const int nativeToggle = toggleKey_.load(std::memory_order_relaxed);
+        const int nativeUnload = unloadKey_.load(std::memory_order_relaxed);
+        if (nativeToggle > 0 && nativeToggle < 256) keysToPoll[nativeToggle] = true;
+        if (nativeUnload > 0 && nativeUnload < 256) keysToPoll[nativeUnload] = true;
         if (captureKey) keysToPoll.fill(true);
         keyPressedThisFrame_.fill(false);
         for (int key = 1; key < 256; ++key) {
@@ -379,6 +393,8 @@ void UiManager::Poll() {
                             key == VK_LWIN || key == VK_RWIN) continue;
                         c.key = key;
                         c.binding = false;
+                        if (item.first == toggleCtlId_) toggleKey_.store(key);
+                        else if (item.first == unloadCtlId_) unloadKey_.store(key);
                         break;
                     }
                 } else if (c.key > 0 && c.key < 256 && keyPressedThisFrame_[c.key]) {
@@ -387,7 +403,21 @@ void UiManager::Poll() {
             }
         }
         keyStatesPrimed_ = true;
+        // Consume the native keys here so the Lua OnPressed callback (if the
+        // script registered one) does not fire the same action a second time.
+        if (nativeToggle > 0 && nativeToggle < 256 && keyPressedThisFrame_[nativeToggle]) {
+            wantToggle = true;
+            auto it = ctls_.find(toggleCtlId_);
+            if (it != ctls_.end()) it->second.pressed = false;
+        }
+        if (nativeUnload > 0 && nativeUnload < 256 && keyPressedThisFrame_[nativeUnload]) {
+            wantUnload = true;
+            auto it = ctls_.find(unloadCtlId_);
+            if (it != ctls_.end()) it->second.pressed = false;
+        }
     }
+    if (wantToggle) ToggleVisible();
+    if (wantUnload && stopFlag_) stopFlag_->store(true);
     if (visible_.load() && imguiReady_ && !IsIconic(hwnd_)) {
         // ImGui's Win32 backend calls XInput, which throws when no controller
         // is present (0xc06d007e). Never let that kill the process.
@@ -506,6 +536,9 @@ void UiManager::SetLabel(int id, const std::string& text) {
     auto it = ctls_.find(id);
     if (it != ctls_.end() && it->second.kind == 0) it->second.text = text;
 }
+void UiManager::SetStatus(const std::string& text) {
+    if (statusCtlId_) SetLabel(statusCtlId_, text);
+}
 int UiManager::AddButton(const std::string& t) {
     int id;
     {
@@ -555,8 +588,13 @@ int UiManager::AddKeybind(const std::string& label, int defaultKey) {
     int id = next_++;
     Ctl c; c.kind = 6; c.tab = currentTab_; c.section = currentSection_; c.text = label;
     c.key = (std::clamp)(defaultKey, 0, 255);
+    const int key = c.key;
     ctls_[id] = std::move(c);
     controlOrder_.push_back(id);
+    // These two keybinds have native actions (see Poll) so they work even when
+    // the worker thread is busy; remapping them here retargets the native key.
+    if (label == "Toggle UI") { toggleCtlId_ = id; toggleKey_.store(key); }
+    else if (label == "Unload") { unloadCtlId_ = id; unloadKey_.store(key); }
     if (hwnd_) PostMessageA(hwnd_, WM_APP + 1, id, 0);
     return id;
 }
@@ -570,6 +608,8 @@ void UiManager::SetKeybind(int id, int key) {
     auto it = ctls_.find(id);
     if (it == ctls_.end() || it->second.kind != 6) return;
     it->second.key = (std::clamp)(key, 0, 255);
+    if (id == toggleCtlId_) toggleKey_.store(it->second.key);
+    else if (id == unloadCtlId_) unloadKey_.store(it->second.key);
 }
 void UiManager::SetDependency(int id, int sourceId, bool expected) {
     std::lock_guard<std::mutex> lk(mtx_);

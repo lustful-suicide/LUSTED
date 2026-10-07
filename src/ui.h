@@ -24,6 +24,11 @@ public:
     bool Visible() const { return visible_.load(); }
     void SetVisible(bool visible);
     void ToggleVisible();
+    // Native toggle/unload keys, handled on the UI thread inside Poll. The
+    // Lua keybind controls ("Toggle UI"/"Unload") only remap these; the action
+    // itself never waits on the worker thread (index build, scripts, rescan).
+    void SetStopFlag(std::atomic<bool>* flag) { stopFlag_ = flag; }
+    void SetStatus(const std::string& text);
 
     void SetTab(const std::string& name);
     void SetSection(const std::string& name);
@@ -99,6 +104,12 @@ private:
     std::string currentSection_ = "General";
     bool hasControls_ = false;
     std::atomic<bool> visible_{ false };
+    std::atomic<int> toggleKey_{ VK_HOME };
+    std::atomic<int> unloadKey_{ VK_END };
+    std::atomic<bool>* stopFlag_{ nullptr };
+    int toggleCtlId_{ 0 };
+    int unloadCtlId_{ 0 };
+    int statusCtlId_{ 0 };
     bool moving_ = false;
     int dockOffsetX_ = 0;
     int dockOffsetY_ = 0;

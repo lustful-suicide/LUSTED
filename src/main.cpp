@@ -90,6 +90,7 @@ int main(int argc, char** argv) {
     std::atomic<bool> finished{ false };
     std::atomic<bool> stop{ false };
     std::atomic<int> code{ 0 };
+    ui.SetStopFlag(&stop);
 
     std::thread worker([&]() {
         OffsetsFetcher fetcher(versionHash);
@@ -107,15 +108,43 @@ int main(int argc, char** argv) {
 
         InstanceStore inst(&mem);
         LuauManager luau(&mem, &inst, &pid, &ui, &drawing, &stop);
+        // Offsets load before anything else so the index pass (started next)
+        // reads an immutable table; Init skips the reload once it sees this.
+        if (!inst.IsLoaded()) {
+            inst.Load(bundle.offsetsJson.string());
+            LustedLog("offsets loaded");
+        }
+        ui.SetStatus("Indexing…");
+        // The heap pass runs ahead of Init now: refresh_game inside Init misses
+        // into the build-wait instead of launching competing sweeps, and the
+        // auto-exec scripts below land on a warm snapshot.
+        std::thread indexThread;
+        if (pid && mem.IsOpen()) {
+            indexThread = std::thread([&]() {
+                if (inst.BuildIndex(pid, true))
+                    LustedLogf("index build done ready=%d", inst.IsIndexReady() ? 1 : 0);
+                else
+                    LustedLog("index build failed/cancelled");
+                ui.SetStatus(inst.IsIndexReady() ? "Ready" : "Index failed");
+            });
+        } else {
+            ui.SetStatus("No attach");
+        }
+        // Script-driven features need the COMPLETE tree (hidden vectors only
+        // land in the sweep union), so auto-exec waits for the full pass.
+        // The fast snapshot marks ready in ~1s and the sweep unions the rest;
+        // the UI stays live on the main thread while this worker waits.
         if (!luau.Init(versionHash, bundle.offsetsJson.string())) {
-            std::cerr << "luau init failed" << std::endl; code = 1; done = true; finished = true; return;
+            std::cerr << "luau init failed" << std::endl;
+            inst.RequestIndexCancel();
+            if (indexThread.joinable()) indexThread.join();
+            code = 1; done = true; finished = true; return;
         }
         LustedLog("luau init ok");
-        // Index after Init: Load() resets the snapshot, so building earlier
-        // would leave the store with an empty index.
-        if (pid && mem.IsOpen()) {
-            inst.BuildIndex(pid, true);
-            LustedLogf("index build done ready=%d", inst.IsIndexReady() ? 1 : 0);
+        if (indexThread.joinable()) {
+            ui.SetStatus("Indexing (full)…");
+            indexThread.join();
+            ui.SetStatus(inst.IsIndexReady() ? "Ready" : "Index failed");
         }
         std::filesystem::path autoDir("C:/LUSTED/Luas");
         std::error_code ec;
@@ -128,6 +157,7 @@ int main(int argc, char** argv) {
             LustedLogf("script start %s", f.filename().string().c_str());
             bool ok = luau.RunFile(f);
             LustedLogf("script end %s ok=%d", f.filename().string().c_str(), ok ? 1 : 0);
+            LustedLogFlush();
             if (!ok) std::cerr << "[auto] failed: " << f.string() << std::endl;
         }
         std::cout << "[run] auto-execution done." << std::endl;
@@ -137,6 +167,10 @@ int main(int argc, char** argv) {
             luau.Poll();
             Sleep(16);
         }
+        // Interactive unload lands here while a pass may still run; in --once
+        // mode the pass is awaited so the exit state covers the whole snapshot.
+        if (!once) inst.RequestIndexCancel();
+        if (indexThread.joinable()) indexThread.join();
         finished = true;
     });
 

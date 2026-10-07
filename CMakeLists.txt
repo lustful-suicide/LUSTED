@@ -78,7 +78,12 @@ target_link_libraries(lusted PRIVATE
 
 # Luau headers come from its targets; ensure C++20 + MSVC compat
 if(MSVC)
-  target_compile_options(lusted PRIVATE /W3 /EHsc)
+  target_compile_options(lusted PRIVATE /W3 /EHsc /O2 /Ot /GL /arch:AVX2 /fp:fast /Oi /DNDEBUG)
+  target_link_options(lusted PRIVATE /LTCG /OPT:REF /OPT:ICF)
+  set_target_properties(lusted PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+else()
+  target_compile_options(lusted PRIVATE -O3 -march=native -DNDEBUG)
+  set_target_properties(lusted PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
 endif()
 
 # Runtime offsets are cached under C:/LUSTED/offsets/.
