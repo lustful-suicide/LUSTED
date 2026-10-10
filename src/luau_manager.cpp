@@ -241,9 +241,9 @@ static int l_get_prop(lua_State* L) {
             return 1;
         }
         case PropType::Bool: {
-            uint8_t v = 0;
-            if (!g_mem->CustomRead(field, &v, 1)) { lua_pushnil(L); return 1; }
-            lua_pushboolean(L, v != 0);
+            bool v = false;
+            if (!g_inst->ReadPropBool(p, addr, v)) { lua_pushnil(L); return 1; }
+            lua_pushboolean(L, v);
             return 1;
         }
         case PropType::I32:
@@ -299,7 +299,7 @@ static int l_set_prop(lua_State* L) {
     uintptr_t fieldBase = g_inst->PropBase(p, addr);
     if (!fieldBase) { lua_pushboolean(L, 0); return 1; }
     uintptr_t field = fieldBase + (uintptr_t)p.offset;
-    if (p.type == PropType::Vec3 && lua_istable(L, 4)) {
+    if ((p.type == PropType::Vec3 || p.type == PropType::C3) && lua_istable(L, 4)) {
         float v[3] = {0, 0, 0};
         const char* names[3] = { "X", "Y", "Z" };
         for (int i = 0; i < 3; ++i) {
@@ -312,9 +312,8 @@ static int l_set_prop(lua_State* L) {
         return 1;
     }
     if (p.type == PropType::Bool) {
-        bool on = lua_isboolean(L, 4) ? lua_toboolean(L, 4) : lua_tonumber(L, 4) != 0;
-        uint8_t v = on ? 1 : 0;
-        lua_pushboolean(L, g_mem->CustomWrite(field, &v, 1));
+        bool on = lua_isboolean(L, 4) ? lua_toboolean(L, 4) != 0 : lua_tonumber(L, 4) != 0;
+        lua_pushboolean(L, g_inst->WritePropBool(p, addr, on));
         return 1;
     }
     float v = (float)lua_tonumber(L, 4);
@@ -654,6 +653,14 @@ static int l_ui_toggle_visible(lua_State* L) {
     if (g_ui) g_ui->ToggleVisible();
     return 0;
 }
+static int l_ui_explorer(lua_State* L) {
+    // ui_explorer(show?) -> visible. No arg toggles.
+    if (!g_ui) { lua_pushboolean(L, 0); return 1; }
+    if (lua_isnoneornil(L, 1)) g_ui->SetExplorerOpen(!g_ui->IsExplorerOpen());
+    else g_ui->SetExplorerOpen(lua_toboolean(L, 1) != 0);
+    lua_pushboolean(L, g_ui->IsExplorerOpen());
+    return 1;
+}
 static int l_luau_rescan(lua_State* L) {
     lua_pushboolean(L, g_luau && g_luau->RescanRoblox());
     return 1;
@@ -667,6 +674,17 @@ static int l_request_unload(lua_State* L) {
     (void)L;
     if (g_luau) g_luau->RequestUnload();
     return 0;
+}
+static int l_on_tick(lua_State* L) {
+    // on_tick(fn) -> tick id (runs ~every frame), or nil.
+    int id = (g_luau && lua_isfunction(L, 1)) ? g_luau->RegisterTickCallback(1) : 0;
+    if (!id) lua_pushnil(L);
+    else lua_pushnumber(L, id);
+    return 1;
+}
+static int l_remove_tick(lua_State* L) {
+    lua_pushboolean(L, g_luau && g_luau->RemoveTickCallback((int)lua_tonumber(L, 1)));
+    return 1;
 }
 
 void LuauManager::RegisterUi() {
@@ -699,9 +717,12 @@ void LuauManager::RegisterUi() {
     lua_pushcfunction(L_, &l_ui_load_config, "ui_load_config"); lua_setglobal(L_, "ui_load_config");
     lua_pushcfunction(L_, &l_ui_delete_config, "ui_delete_config"); lua_setglobal(L_, "ui_delete_config");
     lua_pushcfunction(L_, &l_ui_toggle_visible, "ui_toggle_visible"); lua_setglobal(L_, "ui_toggle_visible");
+    lua_pushcfunction(L_, &l_ui_explorer, "ui_explorer"); lua_setglobal(L_, "ui_explorer");
     lua_pushcfunction(L_, &l_luau_rescan, "luau_rescan"); lua_setglobal(L_, "luau_rescan");
     lua_pushcfunction(L_, &l_luau_run_file, "luau_run_file"); lua_setglobal(L_, "luau_run_file");
     lua_pushcfunction(L_, &l_request_unload, "request_unload"); lua_setglobal(L_, "request_unload");
+    lua_pushcfunction(L_, &l_on_tick, "on_tick"); lua_setglobal(L_, "on_tick");
+    lua_pushcfunction(L_, &l_remove_tick, "remove_tick"); lua_setglobal(L_, "remove_tick");
 }
 
 // ---- Drawing library (transparent overlay) ----
@@ -747,6 +768,23 @@ static int l_dr_set(lua_State* L) {
             lua_rawgeti(L, 3, 2); int g = (int)lua_tonumber(L, -1); lua_pop(L, 1);
             lua_rawgeti(L, 3, 3); int b = (int)lua_tonumber(L, -1); lua_pop(L, 1);
             ok = g_dr->SetColor(id, p, r, g, b);
+        } else if (p == "Colors" && n >= 2) {
+            // gradient stops: {{r,g,b}, ...} (2-8). One color = use Color.
+            std::vector<DrawingManager::Stop> stops;
+            stops.reserve(n > 8 ? 8 : n);
+            bool bad = false;
+            for (size_t i = 1; i <= n && i <= 8; ++i) {
+                lua_rawgeti(L, 3, (int)i);
+                if (!lua_istable(L, -1)) { bad = true; lua_pop(L, 1); break; }
+                lua_rawgeti(L, -1, 1); int r = (int)lua_tonumber(L, -1); lua_pop(L, 1);
+                lua_rawgeti(L, -1, 2); int g = (int)lua_tonumber(L, -1); lua_pop(L, 1);
+                lua_rawgeti(L, -1, 3); int b = (int)lua_tonumber(L, -1); lua_pop(L, 1);
+                lua_pop(L, 1); // stop table
+                DrawingManager::Stop s;
+                s.r = r; s.g = g; s.b = b;
+                stops.push_back(s);
+            }
+            ok = !bad && g_dr->SetColors(id, stops);
         } else ok = false;
     } else if (lua_isboolean(L, 3)) {
         ok = g_dr->Set(id, p, lua_toboolean(L, 3) ? "1" : "0");
@@ -768,6 +806,20 @@ static int l_dr_get(lua_State* L) {
     std::string p = property ? property : "";
     int id = (int)lua_tonumber(L, 1);
     std::string type = g_dr->Get(id, "Type");
+    if (p == "Colors") {
+        std::vector<DrawingManager::Stop> stops;
+        if (!g_dr->GetColors(id, stops) || stops.empty()) { lua_pushnil(L); return 1; }
+        lua_createtable(L, (int)stops.size(), 0);
+        int k = 1;
+        for (auto& s : stops) {
+            lua_createtable(L, 3, 0);
+            lua_pushnumber(L, s.r); lua_rawseti(L, -2, 1);
+            lua_pushnumber(L, s.g); lua_rawseti(L, -2, 2);
+            lua_pushnumber(L, s.b); lua_rawseti(L, -2, 3);
+            lua_rawseti(L, -2, k++);
+        }
+        return 1;
+    }
     std::string v = g_dr->Get(id, p);
     if (v.empty()) lua_pushnil(L);
     else if (p == "Visible" || p == "Filled" || p == "Center") lua_pushboolean(L, v == "1");
@@ -785,7 +837,8 @@ static int l_dr_get(lua_State* L) {
         lua_pushnumber(L, r); lua_rawseti(L, -2, 1);
         lua_pushnumber(L, g); lua_rawseti(L, -2, 2);
         lua_pushnumber(L, b); lua_rawseti(L, -2, 3);
-    } else if (p == "Radius" || p == "Thickness" || p == "Size" || p == "FontSize")
+    } else if (p == "Radius" || p == "Thickness" || p == "Size" || p == "FontSize" ||
+                 p == "Width" || p == "Height")
         lua_pushnumber(L, atof(v.c_str()));
     else lua_pushstring(L, v.c_str());
     return 1;
@@ -880,25 +933,60 @@ bool LuauManager::RegisterControlCallback(int id, int functionIndex) {
     buttonCallbacks_[id] = ref;
     return true;
 }
+int LuauManager::RegisterTickCallback(int functionIndex) {
+    if (!L_ || !lua_isfunction(L_, functionIndex)) return 0;
+    int ref = lua_ref(L_, functionIndex);
+    if (ref == LUA_REFNIL) return 0;
+    int id = nextTickId_++;
+    tickCallbacks_[id] = ref;
+    return id;
+}
+bool LuauManager::RemoveTickCallback(int id) {
+    auto it = tickCallbacks_.find(id);
+    if (it == tickCallbacks_.end()) return false;
+    if (L_) lua_unref(L_, it->second);
+    tickCallbacks_.erase(it);
+    return true;
+}
 void LuauManager::Poll() {
-    if (!L_ || !ui_ || buttonCallbacks_.empty()) return;
-    std::vector<std::pair<int, int>> callbacks(buttonCallbacks_.begin(), buttonCallbacks_.end());
-    for (const auto& [id, ref] : callbacks) {
-        if (!ui_->TakeEvent(id)) continue;
-        auto it = buttonCallbacks_.find(id);
-        if (it == buttonCallbacks_.end() || it->second != ref) continue;
-        lua_getref(L_, ref);
-        lua_pushnumber(L_, id);
-        if (lua_pcall(L_, 1, 0, 0) != 0) {
-            std::cerr << "[luau] UI callback: " << lua_tostring(L_, -1) << "\n";
-            lua_pop(L_, 1);
+    if (!L_) return;
+    if (ui_ && !buttonCallbacks_.empty()) {
+        std::vector<std::pair<int, int>> callbacks(buttonCallbacks_.begin(), buttonCallbacks_.end());
+        for (const auto& [id, ref] : callbacks) {
+            if (!ui_->TakeEvent(id)) continue;
+            auto it = buttonCallbacks_.find(id);
+            if (it == buttonCallbacks_.end() || it->second != ref) continue;
+            lua_getref(L_, ref);
+            lua_pushnumber(L_, id);
+            if (lua_pcall(L_, 1, 0, 0) != 0) {
+                std::cerr << "[luau] UI callback: " << lua_tostring(L_, -1) << "\n";
+                lua_pop(L_, 1);
+            }
         }
+    }
+    if (!tickCallbacks_.empty()) {
+        std::vector<std::pair<int, int>> ticks(tickCallbacks_.begin(), tickCallbacks_.end());
+        std::vector<int> dead;
+        for (const auto& [id, ref] : ticks) {
+            auto it = tickCallbacks_.find(id);
+            if (it == tickCallbacks_.end() || it->second != ref) continue;
+            lua_getref(L_, ref);
+            int pr = lua_pcall(L_, 0, 0, 0);
+            if (pr != 0) {
+                std::cerr << "[luau] tick " << id << ": " << lua_tostring(L_, -1) << "\n";
+                lua_pop(L_, 1);
+                dead.push_back(id);
+            }
+        }
+        for (int id : dead) RemoveTickCallback(id);
     }
 }
 void LuauManager::Close() {
     if (L_) {
         for (const auto& callback : buttonCallbacks_) lua_unref(L_, callback.second);
         buttonCallbacks_.clear();
+        for (const auto& tick : tickCallbacks_) lua_unref(L_, tick.second);
+        tickCallbacks_.clear();
     }
     if (L_) { lua_close(L_); L_ = nullptr; }
     if (g_mem == mem_) g_mem = nullptr;

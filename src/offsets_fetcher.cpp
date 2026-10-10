@@ -23,25 +23,37 @@ std::string OffsetsFetcher::UrlFflagsHpp(const std::string& v) {
     return "https://www.rbxoffsets.com/api/v1/windows/offsets/version-" + v + "/default/fflags.hpp";
 }
 
-bool OffsetsFetcher::SplitUrl(const std::string& url, std::string& host, std::string& path, bool& https) {
+bool OffsetsFetcher::SplitUrl(const std::string& url, std::string& host, INTERNET_PORT& port,
+                              std::string& path, bool& https) {
     std::string u = url;
     https = false;
     if (u.rfind("https://", 0) == 0) { https = true; u = u.substr(8); }
     else if (u.rfind("http://", 0) == 0) { u = u.substr(7); }
     auto slash = u.find('/');
-    if (slash == std::string::npos) { host = u; path = "/"; }
-    else { host = u.substr(0, slash); path = u.substr(slash); }
+    std::string authority = (slash == std::string::npos) ? u : u.substr(0, slash);
+    path = (slash == std::string::npos) ? "/" : u.substr(slash);
+    // Explicit :port (was silently dropped -> always 80/443 before).
+    port = https ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT;
+    auto colon = authority.rfind(':');
+    if (colon != std::string::npos) {
+        int p = atoi(authority.c_str() + colon + 1);
+        if (p > 0 && p < 65536) {
+            port = (INTERNET_PORT)p;
+            authority.resize(colon);
+        }
+    }
+    host = authority;
     return !host.empty();
 }
 
 bool OffsetsFetcher::DownloadToFile(const std::string& url, const std::filesystem::path& out) {
-    std::string host, path; bool https = true;
-    if (!SplitUrl(url, host, path, https)) return false;
+    std::string host, path; INTERNET_PORT port = 0; bool https = true;
+    if (!SplitUrl(url, host, port, path, https)) return false;
     std::wstring wh(host.begin(), host.end()), wp(path.begin(), path.end());
 
     HINTERNET ses = WinHttpOpen(L"Lusted/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, nullptr, nullptr, 0);
     if (!ses) return false;
-    HINTERNET con = WinHttpConnect(ses, wh.c_str(), https ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT, 0);
+    HINTERNET con = WinHttpConnect(ses, wh.c_str(), port, 0);
     if (!con) { WinHttpCloseHandle(ses); return false; }
     DWORD flags = https ? WINHTTP_FLAG_SECURE : 0;
     HINTERNET req = WinHttpOpenRequest(con, L"GET", wp.c_str(), nullptr, nullptr, nullptr, flags);

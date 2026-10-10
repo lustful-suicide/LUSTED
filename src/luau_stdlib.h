@@ -26,7 +26,10 @@ Vector3Meta.Unit = function(self)
     return Vector3(self.X / m, self.Y / m, self.Z / m)
 end
 
-local Instance = {}
+-- Instance is intentionally GLOBAL (not local): feature scripts wrap raw
+-- addresses via Instance.from, and a local would make every such call fail
+-- with "attempt to index nil with 'from'".
+Instance = {}
 Instance.__index = Instance
 
 function Instance.from(address)
@@ -255,7 +258,12 @@ function set_jumppower(value, instance)
 end
 
 function get_rootpart(instance)
-    instance = instance or character
+    -- Fresh character every call: the captured global goes stale across
+    -- respawns, and speed/teleport must follow the live rig.
+    if not instance then
+        local ca = get_character()
+        instance = (ca and Instance.from(ca)) or character
+    end
     if instance then
         local part = instance:FindFirstChild("HumanoidRootPart")
         if part then return part end
@@ -412,6 +420,7 @@ function UI.RequestUnload() return request_unload() end
 UI.Tab("Settings")
 UI.Section("Status")
 local settingsStatus = UI.Label("Ready")
+UI.Button("Toggle Explorer", function() ui_explorer() end)
 UI.Section("Config Manager")
 local configName = UI.Input("Config name", "letters, numbers, _ or -")
 UI.Button("Save config", function()

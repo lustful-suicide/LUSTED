@@ -3,6 +3,7 @@
 #include <atomic>
 #include <string>
 #include <unordered_map>
+#include <vector>
 #include <mutex>
 #include <cstdint>
 
@@ -25,6 +26,12 @@ public:
     bool Set(int id, const std::string& prop, const std::string& val);
     bool SetVec(int id, const std::string& prop, float x, float y);
     bool SetColor(int id, const std::string& prop, int r, int g, int b, int a = 255);
+    // Gradient stops (2-8). Empty = solid single Color. Lines interpolate
+    // along their length; boxes interpolate vertically (fill) / around the
+    // perimeter (border).
+    struct Stop { int r = 255, g = 255, b = 255; };
+    bool SetColors(int id, const std::vector<Stop>& stops);
+    bool GetColors(int id, std::vector<Stop>& out) const;
     std::string Get(int id, const std::string& prop);
 
 private:
@@ -35,17 +42,26 @@ private:
         float w = 100, h = 100;
         float radius = 50;
         int r = 255, g = 255, b = 255, a = 255;
+        std::vector<Stop> stops; // empty = solid Color above
         int thickness = 1;
         bool filled = false;
         bool visible = true;
         bool center = false;
         int size = 16;
         std::string text;
+        // Cached GDI font: creating it per frame cost more than all shapes.
+        HFONT font = nullptr;
+        int fontSize = 0;
     };
     static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l);
     static VOID CALLBACK Tick(HWND h, UINT m, UINT_PTR id, DWORD t);
     static BOOL CALLBACK FindCb(HWND h, LPARAM l);
     void Render(HDC dc);
+    // Dirty rectangles: repaint covers only changed areas, not the whole
+    // screen, so steady 60fps doesn't cost a fullscreen fill per frame.
+    static RECT BBox(const Obj& o);
+    void TouchLocked(const Obj& o);
+    void TouchIdLocked(int id);
     HWND FindRobloxWindow();
     void FollowRoblox();
 
@@ -57,4 +73,6 @@ private:
     std::unordered_map<int, Obj> objs_;
     mutable std::mutex mtx_;
     int next_ = 1;
+    RECT dirty_ = {};
+    bool dirtyFull_ = false;
 };

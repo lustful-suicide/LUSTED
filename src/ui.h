@@ -9,6 +9,7 @@
 #include <vector>
 #include <mutex>
 #include <cstdint>
+#include "explorer.h"
 
 // Polling UI docked next to the Roblox window (TOPMOST tool window).
 class UiManager {
@@ -61,6 +62,12 @@ public:
     bool DeleteConfig(const std::string& name) const;
     std::vector<std::string> ConfigNames() const;
 
+    // Standalone Explorer window (see explorer.h/cpp): tree + click-to-props.
+    void SetExplorerStore(class InstanceStore* store) { explorer_.SetStore(store); }
+    void SetExplorerPid(DWORD* pid) { explorer_.SetPidPtr(pid); }
+    void SetExplorerOpen(bool open) { explorer_.SetOpen(open); }
+    bool IsExplorerOpen() const { return explorer_.IsOpen(); }
+
 private:
     struct Ctl {
         int kind = 0;
@@ -81,6 +88,7 @@ private:
     void CreateRenderTarget();
     void CleanupRenderTarget();
     void Resize(UINT width, UINT height);
+    void SyncSwapchain();
     void Render();
     static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l);
     static BOOL CALLBACK FindCb(HWND h, LPARAM l);
@@ -117,4 +125,6 @@ private:
     bool keyStatesPrimed_ = false;
     std::array<bool, 256> keyDowns_{};
     std::array<bool, 256> keyPressedThisFrame_{};
+    int swapW_ = 0, swapH_ = 0;
+    Explorer explorer_;
 };

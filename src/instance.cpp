@@ -297,6 +297,11 @@ uintptr_t InstanceStore::GetParent(uintptr_t inst) {
     return FastReadable(p) ? p : 0;
 }
 
+bool InstanceStore::IsAlive(uintptr_t inst) {
+    if (!FastReadable(inst)) return false;
+    return ReadPtr(inst + 8) == inst;
+}
+
 bool InstanceStore::IsValidInstance(uintptr_t inst) {
     if (!FastReadable(inst)) return false;
     if (ReadPtr(inst + 8) != inst) return false;                     // This
@@ -1151,7 +1156,7 @@ const std::unordered_set<std::string>& BoolNames() {
         "Anchored","CanCollide","CanTouch","CanQuery","Locked","Massless","CastShadow",
         "Looped","IsPlaying","Enabled","Visible","Seated","Jump","Sit","PlatformStand",
         "RequiresNeck","EvaluateStateMachine","BreakJointsOnDeath","LocalPlayer",
-        "GlobalWind","Frozen","Shadows","CloudsEnabled","AutoRotate","AutoJumpEnabled",
+        "GlobalWind","Frozen","Shadows","GlobalShadows","CloudsEnabled","AutoRotate","AutoJumpEnabled",
         "UseJumpPower","StreaksOn","CharacterAutoLoads","Neutral","Loaded",
         "Archivable","Robust","Persistent","KeepVelocity","AssemblyLinearVelocity",
         "TouchedGui","Grounded","Stiffness","Adornee","Bevel","ClipsDescendants",
@@ -1347,7 +1352,11 @@ PropInfo InstanceStore::ResolvePropRaw(const std::string& cls,
         }
     }
 
-    // 3) unique global match (member exists on exactly one class)
+    // 3) unique global match (member exists on exactly one class).
+    // Bitfield owners (*Flags, e.g. PrimitiveFlags.CanCollide=8) are resolved
+    // as bit ops on the matching Flags field, NEVER as raw offsets: the raw
+    // value is a bit index, and a byte write there lands on unrelated memory
+    // (for parts: base+8, the This pointer) and corrupts the target.
     {
         const std::string* owner = nullptr;
         int count = 0;
@@ -1357,8 +1366,29 @@ PropInfo InstanceStore::ResolvePropRaw(const std::string& cls,
             owner = &c;
         }
         if (count == 1 && owner) {
-            out = typeFor(*owner, member);
-            out.offset = *OffsetOf(*owner, member);
+            const std::string& oc = *owner;
+            if (oc.size() > 5 && oc.compare(oc.size() - 5, 5, "Flags") == 0) {
+                // "PrimitiveFlags" -> base object "Primitive" via the chain hop
+                // (BasePart.Primitive), field "Flags" on it (Primitive.Flags).
+                // The dump value is a BITMASK (CanCollide=8 tests bit 3).
+                const std::string base = oc.substr(0, oc.size() - 5);
+                auto maskVal = OffsetOf(oc, member);
+                if (maskVal && *maskVal > 0) {
+                    for (const auto& c : chain) {
+                        auto hop = OffsetOf(c, base);
+                        auto field = OffsetOf(base, "Flags");
+                        if (!hop || !field) continue;
+                        out.type = PropType::Bool;
+                        out.offset = *field;
+                        out.hops = { *hop };
+                        out.mask = *maskVal;
+                        return out;
+                    }
+                }
+                return out; // !ok: safe fail, never a raw byte write
+            }
+            out = typeFor(oc, member);
+            out.offset = *OffsetOf(oc, member);
             out.hops.clear();
             return out;
         }
@@ -1374,6 +1404,11 @@ PropInfo InstanceStore::ResolvePropRaw(const std::string& cls,
                 hit = &it->second;
             }
             if (hits == 1 && hit) {
+                // Same bitfield guard as above: never hand out a Flags bit
+                // index as a raw byte offset.
+                if (hit->realClass.size() > 5 &&
+                    hit->realClass.compare(hit->realClass.size() - 5, 5, "Flags") == 0)
+                    return out;
                 out = typeFor(hit->realClass, hit->realMember);
                 out.offset = hit->offset;
                 out.hops.clear();
@@ -1411,6 +1446,51 @@ bool InstanceStore::WritePropFloat(const PropInfo& p, uintptr_t inst, float v) c
     uintptr_t base = PropBase(p, inst);
     if (!base) return false;
     return mem_->Write<float>(base + (uintptr_t)p.offset, v);
+}
+bool InstanceStore::ReadPropBool(const PropInfo& p, uintptr_t inst, bool& out) const {
+    if (!p.ok() || p.type != PropType::Bool || !inst || !mem_) return false;
+    uintptr_t base = PropBase(p, inst);
+    if (!base) return false;
+    const uintptr_t field = base + (uintptr_t)p.offset;
+    if (p.mask != 0) {
+        if (p.mask <= 0xFFFFFFFFLL) {
+            uint32_t w = 0;
+            if (!mem_->CustomRead(field, &w, sizeof(w))) return false;
+            out = (w & (uint32_t)p.mask) != 0;
+            return true;
+        }
+        uint64_t w = 0;
+        if (!mem_->CustomRead(field, &w, sizeof(w))) return false;
+        out = (w & (uint64_t)p.mask) != 0;
+        return true;
+    }
+    uint8_t v = 0;
+    if (!mem_->CustomRead(field, &v, sizeof(v))) return false;
+    out = v != 0;
+    return true;
+}
+bool InstanceStore::WritePropBool(const PropInfo& p, uintptr_t inst, bool value) const {
+    if (!p.ok() || p.type != PropType::Bool || !inst || !mem_) return false;
+    uintptr_t base = PropBase(p, inst);
+    if (!base) return false;
+    const uintptr_t field = base + (uintptr_t)p.offset;
+    if (p.mask != 0) {
+        // Read-modify-write so neighboring flag bits are preserved.
+        if (p.mask <= 0xFFFFFFFFLL) {
+            uint32_t w = 0;
+            if (!mem_->CustomRead(field, &w, sizeof(w))) return false;
+            if (value) w |= (uint32_t)p.mask;
+            else w &= ~(uint32_t)p.mask;
+            return mem_->Write<uint32_t>(field, w);
+        }
+        uint64_t w = 0;
+        if (!mem_->CustomRead(field, &w, sizeof(w))) return false;
+        if (value) w |= (uint64_t)p.mask;
+        else w &= ~(uint64_t)p.mask;
+        return mem_->Write<uint64_t>(field, w);
+    }
+    const uint8_t v = value ? 1 : 0;
+    return mem_->CustomWrite(field, &v, sizeof(v));
 }
 std::optional<int64_t> InstanceStore::OffsetOfInsensitive(const std::string& cls, const std::string& member) const {
     if (auto o = OffsetOf(cls, member)) return o;
@@ -1491,6 +1571,91 @@ std::string InstanceStore::ReadPropString(const PropInfo& p, uintptr_t inst) con
     uintptr_t base = PropBase(p, inst);
     if (!base) return "";
     return ReadRobloxString(base + (uintptr_t)p.offset, 128);
+}
+
+std::vector<std::string> InstanceStore::MembersOfClass(const std::string& cls) const {
+    std::vector<std::string> out;
+    if (cls.empty()) return out;
+    std::unordered_set<std::string> seen;
+    for (const auto& c : ClassChain(cls)) {
+        auto it = table_.find(c);
+        if (it == table_.end()) continue;
+        for (const auto& [m, off] : it->second) {
+            (void)off;
+            if (seen.insert(m).second) out.push_back(m);
+        }
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+std::string InstanceStore::ReadPropDisplay(uintptr_t inst, const std::string& cls,
+                                           const std::string& member) const {
+    if (!inst || !mem_) return "-";
+    PropInfo p = ResolveProp(inst, cls, member);
+    if (!p.ok()) return "-";
+    uintptr_t base = PropBase(p, inst);
+    if (!base) return "-";
+    const uintptr_t field = base + (uintptr_t)p.offset;
+    char b[128];
+    switch (p.type) {
+        case PropType::Vec3:
+        case PropType::C3: {
+            float v[3] = {};
+            if (!mem_->CustomRead(field, v, sizeof(v))) return "?";
+            snprintf(b, sizeof(b), "(%.4g, %.4g, %.4g)", v[0], v[1], v[2]);
+            return b;
+        }
+        case PropType::CF: {
+            float v[12] = {};
+            if (!ReadPropCFrame(p, inst, v)) return "?";
+            snprintf(b, sizeof(b), "pos(%.3g, %.3g, %.3g)", v[9], v[10], v[11]);
+            return b;
+        }
+        case PropType::Bool: {
+            bool v = false;
+            if (!ReadPropBool(p, inst, v)) return "?";
+            return v ? "true" : "false";
+        }
+        case PropType::I32: {
+            int32_t v = 0;
+            if (!mem_->CustomRead(field, &v, 4)) return "?";
+            snprintf(b, sizeof(b), "%d", v);
+            return b;
+        }
+        case PropType::U32: {
+            uint32_t v = 0;
+            if (!mem_->CustomRead(field, &v, 4)) return "?";
+            snprintf(b, sizeof(b), "%u", v);
+            return b;
+        }
+        case PropType::U64:
+        case PropType::Ptr: {
+            uintptr_t v = 0;
+            if (!mem_->CustomRead(field, &v, 8)) return "?";
+            if (!v) return "nil";
+            snprintf(b, sizeof(b), "0x%llX", (unsigned long long)v);
+            return b;
+        }
+        case PropType::Vec2: {
+            float v[2] = {};
+            if (!mem_->CustomRead(field, v, sizeof(v))) return "?";
+            snprintf(b, sizeof(b), "(%.4g, %.4g)", v[0], v[1]);
+            return b;
+        }
+        case PropType::RbxString:
+        case PropType::String: {
+            std::string v = ReadPropString(p, inst);
+            if (v.size() > 64) v.resize(64);
+            return v.empty() ? "\"\"" : ("\"" + v + "\"");
+        }
+        default: {
+            float v = 0;
+            if (!ReadPropFloat(p, inst, v)) return "?";
+            snprintf(b, sizeof(b), "%.4g", v);
+            return b;
+        }
+    }
 }
 
 // ------------------------------------------------------------------ DataModel

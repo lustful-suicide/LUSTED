@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 #include <optional>
 #include <unordered_map>
@@ -24,6 +25,10 @@ struct PropInfo {
     // sub-object hops: base+hop[0] holds a pointer, whose +hop[1] holds the next
     // pointer, and so on; the field is then at offset from the last pointer.
     std::vector<int64_t> hops;
+    // bitfield selectors (PrimitiveFlags.*): mask != 0 means the value is the
+    // masked bits of the word at offset (read-modify-write), not a byte at
+    // offset. The dump stores MASKS (CanCollide=8 is bit 3), not indices.
+    int64_t mask = 0;
     bool ok() const { return type != PropType::None; }
 };
 
@@ -81,6 +86,9 @@ public:
     std::string GetName(uintptr_t inst);
     std::string GetClass(uintptr_t inst);
     uintptr_t GetParent(uintptr_t inst);
+    // Liveness: This-pointer check only (1 read). Explorer uses it to prune
+    // freed instances without trusting stale caches.
+    bool IsAlive(uintptr_t inst);
 
     // tree (index-backed, instant)
     std::vector<uintptr_t> GetChildren(uintptr_t inst, bool allowScan = true);
@@ -114,18 +122,25 @@ public:
     bool HasProp(const std::string& cls, const std::string& member) const;
     bool ReadPropFloat(const PropInfo& p, uintptr_t inst, float& out) const;
     bool WritePropFloat(const PropInfo& p, uintptr_t inst, float value) const;
+    // Boolean reads/writes honoring bitfield selectors (PrimitiveFlags.*).
+    bool ReadPropBool(const PropInfo& p, uintptr_t inst, bool& out) const;
+    bool WritePropBool(const PropInfo& p, uintptr_t inst, bool value) const;
     // Replication-safe mirrored float write (UCRobloxExternal dual-write fix):
     // Humanoid Walkspeed <-> WalkspeedCheck and JumpPower <-> JumpHeight stay
     // in sync or the server kicks. Case-insensitive, best-effort on mirrors.
     bool WritePropFloatMirrored(uintptr_t inst, const std::string& cls, const std::string& member, float value) const;
     std::optional<int64_t> OffsetOfInsensitive(const std::string& cls, const std::string& member) const;
-    bool ReadPropVec3(const PropInfo& p, uintptr_t inst, float out[3]) const;
-    bool WritePropVec3(const PropInfo& p, uintptr_t inst, const float v[3]) const;
+    bool ReadPropVec3(const PropInfo& p, uintptr_t inst, float out[3]) const;    bool WritePropVec3(const PropInfo& p, uintptr_t inst, const float v[3]) const;
     // CFrame = Primitive.Rotation (9 floats) immediately followed by
     // Primitive.Position (3 floats); resolved as one contiguous 48-byte block.
     bool ReadPropCFrame(const PropInfo& p, uintptr_t inst, float out[12]) const;
     bool WritePropCFrame(const PropInfo& p, uintptr_t inst, const float v[12]) const;
     std::string ReadPropString(const PropInfo& p, uintptr_t inst) const;
+    // Explorer support: member names for a class (chain-merged, sorted) and a
+    // one-line display value for (inst, member). Never sweeps; pure reads.
+    std::vector<std::string> MembersOfClass(const std::string& cls) const;
+    std::string ReadPropDisplay(uintptr_t inst, const std::string& cls,
+                                const std::string& member) const;
 
     // DataModel auto-resolve (cheap validation) + manual override
     uintptr_t GetDataModel(DWORD pid);

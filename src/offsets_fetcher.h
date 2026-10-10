@@ -1,6 +1,8 @@
 #pragma once
 #include <filesystem>
 #include <string>
+#include <windows.h>
+#include <winhttp.h>
 
 struct OffsetBundle {
     std::string versionHash;
@@ -24,10 +26,12 @@ public:
     static std::string UrlStructHpp(const std::string& v);
     static std::string UrlFflagsJson(const std::string& v);
     static std::string UrlFflagsHpp(const std::string& v);
+    // Shared downloader (also used for the first-run official-luas fetch).
+    static bool DownloadToFile(const std::string& url, const std::filesystem::path& out);
 
 private:
     std::string version_;
     std::filesystem::path root_;
-    bool DownloadToFile(const std::string& url, const std::filesystem::path& out);
-    static bool SplitUrl(const std::string& url, std::string& host, std::string& path, bool& https);
+    static bool SplitUrl(const std::string& url, std::string& host, INTERNET_PORT& port,
+                         std::string& path, bool& https);
 };

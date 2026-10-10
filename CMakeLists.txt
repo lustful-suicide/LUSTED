@@ -47,6 +47,7 @@ add_executable(lusted
   src/memory.cpp
   src/instance.cpp
   src/ui.cpp
+  src/explorer.cpp
   src/drawing.cpp
   src/luau_manager.cpp
   ${imgui_SOURCE_DIR}/imgui.cpp

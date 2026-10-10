@@ -40,12 +40,12 @@ Raw functions:
 - `drawing_destroy(id)` removes one object.
 - `drawing_clear()` removes all objects.
 
-Supported types are `Line`, `Square` (or `Box`), `Circle`, and `Text`. Values for positions and sizes are two-element arrays; colors are three-element RGB arrays. Common properties are `Visible`, `Color`, `Thickness`, and `Filled`.
+Supported types are `Line`, `Square` (or `Box`), `Circle`, and `Text`. Values for positions and sizes are two-element arrays; colors are three-element RGB arrays. Common properties are `Visible`, `Color`, `Thickness`, and `Filled`. `Colors` takes an array of 2–8 RGB stops for a gradient (lines blend along their length, boxes blend vertically); setting a single `Color` afterwards returns the object to solid.
 
 | Type | Main properties |
 | --- | --- |
-| `Line` | `From`, `To`, `Color`, `Thickness`, `Visible` |
-| `Square` / `Box` | `Position`, `Size`, `Color`, `Thickness`, `Filled`, `Visible` |
+| `Line` | `From`, `To`, `Color`/`Colors`, `Thickness`, `Visible` |
+| `Square` / `Box` | `Position`, `Size` (or `Width` + `Height`), `Color`/`Colors`, `Thickness`, `Filled`, `Visible` |
 | `Circle` | center `Position`, `Radius`, `Color`, `Thickness`, `Filled`, `Visible` |
 | `Text` | `Position`, `Text`, `Color`, `Size`/`FontSize`, `Center`, `Visible` |
 

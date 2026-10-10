@@ -11,6 +11,7 @@
 #include <fstream>
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <thread>
 #include <atomic>
 #include <vector>
@@ -22,12 +23,56 @@ static std::vector<std::filesystem::path> CollectLuas(const std::filesystem::pat
     if (!std::filesystem::exists(dir, ec)) return out;
     for (auto& e : std::filesystem::directory_iterator(dir, ec)) {
         if (ec) break;
+        // First-run fetched pack lives one level down (Luas/official/).
+        if (e.is_directory(ec)) {
+            if (e.path().filename() != "official") continue;
+            for (auto& f : std::filesystem::directory_iterator(e.path(), ec)) {
+                if (ec) break;
+                if (!f.is_regular_file(ec)) continue;
+                auto ext = f.path().extension().string();
+                if (ext == ".luau" || ext == ".lua") out.push_back(f.path());
+            }
+            continue;
+        }
         if (!e.is_regular_file(ec)) continue;
         auto ext = e.path().extension().string();
         if (ext == ".luau" || ext == ".lua") out.push_back(e.path());
     }
     std::sort(out.begin(), out.end());
     return out;
+}
+
+// First run: fetch C:/LUSTED/Luas/official/ from GitHub (raw). Override
+// with LUSTED_OFFICIAL_LUAS_URL ("<base>/", trailing slash optional).
+// Absent until pushed upstream -> logs and retries next launch.
+static void EnsureOfficialLuas() {
+    namespace fs = std::filesystem;
+    static const char* kFiles[] = {
+        "speed.luau", "jump.luau", "noclip.luau", "teleport.luau", "fullbright.luau",
+    };
+    constexpr size_t kCount = sizeof(kFiles) / sizeof(kFiles[0]);
+    std::error_code ec;
+    const fs::path destDir("C:/LUSTED/Luas/official");
+    if (fs::exists(destDir, ec)) {
+        for (auto& e : fs::directory_iterator(destDir, ec)) {
+            if (ec) break;
+            if (!e.is_regular_file(ec)) continue;
+            auto ext = e.path().extension().string();
+            if (ext == ".luau" || ext == ".lua") return; // already fetched
+        }
+    }
+    const char* env = std::getenv("LUSTED_OFFICIAL_LUAS_URL");
+    std::string base = (env && *env)
+        ? env
+        : "https://raw.githubusercontent.com/lustful-suicide/LUSTED/main/official-luas/";
+    if (!base.empty() && base.back() != '/') base.push_back('/');
+    fs::create_directories(destDir, ec);
+    size_t got = 0;
+    for (auto* f : kFiles)
+        if (OffsetsFetcher::DownloadToFile(base + f, destDir / f)) ++got;
+    std::cout << "[official] fetched " << got << "/" << kCount
+              << " from " << base << std::endl;
+    if (!got) LustedLog("official fetch failed; retrying next launch");
 }
 
 static bool LooksLikeHash(const std::string& s) {
@@ -108,6 +153,10 @@ int main(int argc, char** argv) {
 
         InstanceStore inst(&mem);
         LuauManager luau(&mem, &inst, &pid, &ui, &drawing, &stop);
+        // Explorer window reads through this same store (stable address even
+        // across rescan moves); pid pointer is main's, also stable.
+        ui.SetExplorerStore(&inst);
+        ui.SetExplorerPid(&pid);
         // Offsets load before anything else so the index pass (started next)
         // reads an immutable table; Init skips the reload once it sees this.
         if (!inst.IsLoaded()) {
@@ -149,6 +198,7 @@ int main(int argc, char** argv) {
         std::filesystem::path autoDir("C:/LUSTED/Luas");
         std::error_code ec;
         std::filesystem::create_directories(autoDir, ec);
+        EnsureOfficialLuas();
         auto luas = CollectLuas(autoDir);
         std::cout << "[auto] " << luas.size() << " file(s) in " << autoDir.string() << std::endl;
         LustedLogf("auto-exec start files=%zu", luas.size());
@@ -163,9 +213,12 @@ int main(int argc, char** argv) {
         std::cout << "[run] auto-execution done." << std::endl;
         LustedLog("auto-exec done");
         done = true;
+        // Tight poll cadence: per-frame features (noclip re-enforce vs server
+        // replication races, teleport spam) need as many ticks per second as
+        // cheap polling allows. TakeEvent/Poll work is microseconds.
         while (!once && !stop) {
             luau.Poll();
-            Sleep(16);
+            Sleep(8);
         }
         // Interactive unload lands here while a pass may still run; in --once
         // mode the pass is awaited so the exit state covers the whole snapshot.

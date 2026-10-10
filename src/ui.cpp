@@ -91,11 +91,8 @@ LRESULT CALLBACK UiManager::WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (g_ui && g_ui->imguiReady_ && ImGui_ImplWin32_WndProcHandler(h, m, w, l))
         return TRUE;
 
-    if (g_ui && m == WM_NCHITTEST) {
-        POINT cursor{ GET_X_LPARAM(l), GET_Y_LPARAM(l) };
-        ScreenToClient(h, &cursor);
-        if (cursor.y >= 0 && cursor.y < 28) return HTCAPTION;
-    }
+    // No HTCAPTION handling: the host window is a fullscreen transparent
+    // overlay; dragging happens on the ImGui panels' own title bars instead.
     if (g_ui && m == WM_MOVING) {
         HWND target = g_ui->FindRobloxWindow();
         RECT clientBounds{};
@@ -190,32 +187,27 @@ HWND UiManager::FindRobloxWindow() {
 void UiManager::DockToRoblox() {
     if (!hwnd_ || !hasControls_ || !visible_.load() || moving_) return;
     HWND r = FindRobloxWindow();
-    int baseX = 0, baseY = 0;
-    int width = 460, height = 610;
+    // Transparent fullscreen overlay: cover the whole game client area so the
+    // draggable panels can live anywhere. Clicks pass through except on panels
+    // (magenta colorkey, same trick as the drawing overlay).
     RECT bounds{};
-    bool constrained = false;
     if (r && !IsIconic(r)) {
-        if (GetClientScreenBounds(r, bounds)) {
-            constrained = true;
-            width = (std::min)(width, (int)(bounds.right - bounds.left));
-            height = (std::min)(height, (int)(bounds.bottom - bounds.top));
-            baseX = bounds.right - width - 16;
-            baseY = bounds.top + 16;
-        }
+        if (!GetClientScreenBounds(r, bounds)) return;
     } else if (r && IsIconic(r)) {
         ShowWindow(hwnd_, SW_HIDE);
         return;
+    } else {
+        bounds.left = 0; bounds.top = 0;
+        bounds.right = GetSystemMetrics(SM_CXSCREEN);
+        bounds.bottom = GetSystemMetrics(SM_CYSCREEN);
     }
-    RECT desired{ baseX + dockOffsetX_, baseY + dockOffsetY_,
-        baseX + dockOffsetX_ + width, baseY + dockOffsetY_ + height };
-    if (constrained) ClampWindowRect(desired, bounds);
     RECT current{};
     GetWindowRect(hwnd_, &current);
-    if (!IsWindowVisible(hwnd_) || current.left != desired.left || current.top != desired.top ||
-        current.right - current.left != desired.right - desired.left ||
-        current.bottom - current.top != desired.bottom - desired.top)
-        SetWindowPos(hwnd_, HWND_TOPMOST, desired.left, desired.top,
-            desired.right - desired.left, desired.bottom - desired.top, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    if (!IsWindowVisible(hwnd_) || current.left != bounds.left || current.top != bounds.top ||
+        current.right - current.left != bounds.right - bounds.left ||
+        current.bottom - current.top != bounds.bottom - bounds.top)
+        SetWindowPos(hwnd_, HWND_TOPMOST, bounds.left, bounds.top,
+            bounds.right - bounds.left, bounds.bottom - bounds.top, SWP_NOACTIVATE | SWP_SHOWWINDOW);
 }
 
 void UiManager::CreateRenderTarget() {
@@ -235,9 +227,21 @@ void UiManager::CleanupRenderTarget() {
 
 void UiManager::Resize(UINT width, UINT height) {
     if (!swapChain_ || !width || !height) return;
+    if (width == swapW_ && height == swapH_) return;
+    swapW_ = (int)width; swapH_ = (int)height;
     CleanupRenderTarget();
     if (SUCCEEDED(swapChain_->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0)))
         CreateRenderTarget();
+}
+
+// Keeps the swapchain buffers matched to the overlay client area (the game
+// window moves/resizes under us). Called on the UI thread inside Poll.
+void UiManager::SyncSwapchain() {
+    if (!hwnd_ || !swapChain_) return;
+    RECT rc{};
+    if (!GetClientRect(hwnd_, &rc)) return;
+    const int w = rc.right - rc.left, h = rc.bottom - rc.top;
+    if (w > 0 && h > 0) Resize((UINT)w, (UINT)h);
 }
 
 bool UiManager::Init(const std::string& title, DWORD pid) {
@@ -251,12 +255,16 @@ bool UiManager::Init(const std::string& title, DWORD pid) {
     wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
     wc.hbrBackground = nullptr;
     RegisterClassA(&wc);
-    hwnd_ = CreateWindowExA(WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+    hwnd_ = CreateWindowExA(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
         "LustedImGuiClass", title.c_str(),
         WS_POPUP,
-        CW_USEDEFAULT, CW_USEDEFAULT, 460, 610, nullptr, nullptr,
+        0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN),
+        nullptr, nullptr,
         GetModuleHandleA(nullptr), nullptr);
     if (!hwnd_) return false;
+    // Magenta colorkey: the cleared background disappears (click-through),
+    // panels stay. Same trick as the drawing overlay.
+    SetLayeredWindowAttributes(hwnd_, RGB(255, 0, 255), 0, LWA_COLORKEY);
 
     DXGI_SWAP_CHAIN_DESC swapDesc{};
     swapDesc.BufferCount = 2;
@@ -358,6 +366,7 @@ void UiManager::Poll() {
         DispatchMessageA(&msg);
     }
     DockToRoblox();
+    SyncSwapchain();
     // Native toggle/unload live on this thread: the Lua callbacks for the same
     // keys only run when the worker reaches its Poll loop (after index + auto
     // exec), which is why Home/End used to feel dead during startup.
@@ -436,13 +445,16 @@ void UiManager::Render() {
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
-    ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
-    ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
-    ImGui::Begin("LUSTED", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings);
+    // Draggable/resizable floating panel (no NoMove/NoResize): the host OS
+    // window is a transparent overlay, panels move on their own title bars.
+    ImGui::SetNextWindowPos(ImVec2(24.0f, 24.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(460.0f, 610.0f), ImGuiCond_FirstUseEver);
+    ImGui::Begin("LUSTED", nullptr, ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoSavedSettings);
     ImGui::BeginChild("##LustedContent", ImVec2(0.0f, 0.0f), ImGuiChildFlags_None,
         ImGuiWindowFlags_AlwaysVerticalScrollbar);
 
+    {
     std::lock_guard<std::mutex> lk(mtx_);
     std::vector<std::string> tabs;
     std::unordered_set<std::string> seenTabs;
@@ -502,8 +514,11 @@ void UiManager::Render() {
     }
     ImGui::EndChild();
     ImGui::End();
+    } // release UI mutex before Explorer (remote reads on click frames)
+    explorer_.Render();
     ImGui::Render();
-    const float clearColor[4] = { 0.055f, 0.065f, 0.073f, 1.0f };
+    // Magenta = transparent colorkey (see Init): only panels remain visible.
+    const float clearColor[4] = { 1.0f, 0.0f, 1.0f, 1.0f };
     context_->OMSetRenderTargets(1, &renderTarget_, nullptr);
     context_->ClearRenderTargetView(renderTarget_, clearColor);
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
