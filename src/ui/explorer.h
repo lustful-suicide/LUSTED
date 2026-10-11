@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <deque>
 #include <mutex>
+#include <shared_mutex>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -22,7 +24,8 @@ public:
     Explorer() = default;
     ~Explorer();
 
-    void SetStore(InstanceStore* store) { store_ = store; }
+    void SetStore(InstanceStore* store);
+    void WithStoreExclusive(const std::function<void()>& action);
     void SetPidPtr(DWORD* pid) { pid_ = pid; }
     void SetOpen(bool open) { open_.store(open); }
     bool IsOpen() const { return open_.load(); }
@@ -54,6 +57,7 @@ private:
     void RefreshExpanded();
 
     InstanceStore* store_ = nullptr;
+    std::shared_mutex storeAccessMutex_;
     DWORD* pid_ = nullptr;
     std::atomic<bool> open_{ true };
     mutable std::mutex mtx_;

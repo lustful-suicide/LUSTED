@@ -1,5 +1,5 @@
-#include "memory.h"
-#include "log.h"
+#include "platform/windows/memory.h"
+#include "support/log.h"
 #include <iostream>
 
 typedef LONG NTSTATUS;
@@ -40,17 +40,27 @@ void Memory::Detach() {
 }
 
 bool Memory::CustomWrite(uintptr_t address, const void* data, size_t size) {
+    return CustomWriteImpl(address, data, size, true, true);
+}
+
+bool Memory::CustomWriteFast(uintptr_t address, const void* data, size_t size) {
+    return CustomWriteImpl(address, data, size, false, false);
+}
+
+bool Memory::CustomWriteImpl(uintptr_t address, const void* data, size_t size,
+                             bool verify, bool logSuccess) {
     if (!IsOpen() || !address || !data || !size) return false;
     if (!ResolveNt()) return false;
 
     // Phase timers: anything over a millisecond is logged with its breakdown so
     // the slow phase is named instead of guessed at.
-    LARGE_INTEGER fr, ta, tb, tc, td, te;
-    QueryPerformanceFrequency(&fr);
+    const bool measure = verify || logSuccess;
+    LARGE_INTEGER fr{}, ta{}, tb{}, tc{}, td{};
+    if (measure) QueryPerformanceFrequency(&fr);
     const auto us = [&](LARGE_INTEGER a, LARGE_INTEGER b) {
         return (double)(b.QuadPart - a.QuadPart) * 1e6 / (double)fr.QuadPart;
     };
-    QueryPerformanceCounter(&ta);
+    if (measure) QueryPerformanceCounter(&ta);
 
     // Write rights are scoped to this call: open, use, drop.
     HANDLE hw = OpenProcess(PROCESS_VM_WRITE | PROCESS_VM_OPERATION, FALSE, pid_);
@@ -79,6 +89,7 @@ bool Memory::CustomWrite(uintptr_t address, const void* data, size_t size) {
 
     SIZE_T done = writeOnce(0);
     bool didProtect = false;
+    bool protectionRestored = true;
     if (done != size) {
         PVOID base = (PVOID)address;
         SIZE_T region = size;
@@ -87,19 +98,26 @@ bool Memory::CustomWrite(uintptr_t address, const void* data, size_t size) {
             const SIZE_T retry = writeOnce(done);
             done += retry;
             PVOID rb = (PVOID)address; SIZE_T rs = size; ULONG tmp = 0;
-            pNtProtect(hw, &rb, &rs, oldProt ? oldProt : PAGE_EXECUTE_READ, &tmp);
+            protectionRestored = NT_SUCCESS(
+                pNtProtect(hw, &rb, &rs, oldProt ? oldProt : PAGE_EXECUTE_READ, &tmp));
             FlushInstructionCache(hw, (LPCVOID)address, size);
             didProtect = true;
         }
     }
     CloseHandle(hw);
-    QueryPerformanceCounter(&tb);
+    if (measure) QueryPerformanceCounter(&tb);
 
+    if (!protectionRestored) {
+        LustedLogf("write PROTECTRESTOREFAIL addr=0x%llx size=%zu",
+                   (unsigned long long)address, size);
+        return false;
+    }
     if (done != size) {
         LustedLogf("write SHORT addr=0x%llx want=%zu got=%zu",
                    (unsigned long long)address, size, done);
         return false;
     }
+    if (!verify) return true;
     // Verify by reading back through the persistent read handle.
     std::vector<uint8_t> back(size);
     const bool verified = CustomRead(address, back.data(), size) &&
@@ -110,7 +128,7 @@ bool Memory::CustomWrite(uintptr_t address, const void* data, size_t size) {
     snprintf(line, sizeof(line), "write addr=0x%llx size=%zu verify=%s mode=%s",
              (unsigned long long)address, size, verified ? "ok" : "MISMATCH",
              didProtect ? "protect" : "direct");
-    LustedLog(line);
+    if (logSuccess || !verified) LustedLog(line);
     QueryPerformanceCounter(&td);
     const double wallUs = us(ta, td);
     if (wallUs > 1000.0)

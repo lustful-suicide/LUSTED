@@ -1,8 +1,7 @@
--- Official: teleport to a player by name (writes THEIR hrp CFrame to YOUR hrp,
--- repeated until close: the server snaps lone writes back within a frame or
--- two, so one shot looks like "nothing happens").
+-- Official: teleport to a player by name.
 ui_tab("Official")
 ui_section("Teleport")
+
 local nameId = ui_input("Player name", "exact display name")
 local function myHRP()
     local ca = get_character()
@@ -10,59 +9,128 @@ local function myHRP()
     if not ch then return nil end
     return ch:FindFirstChild("HumanoidRootPart") or get_rootpart(ch)
 end
-local function hrpPos(hrp)
-    if not hrp then return nil end
-    local v = get_prop(hrp:addr(), hrp.ClassName, "Position")
-    if type(v) ~= "table" then return nil end
-    return v.X, v.Y, v.Z
-end
-local repId, repLeft, repCF, repName = nil, 0, nil, nil
-local function stopRep()
-    if repId then remove_tick(repId) repId = nil end
-    repLeft, repCF, repName = 0, nil, nil
-end
-local tpId = ui_button("Teleport")
-ui_on_pressed(tpId, function()
-    local nm = ui_input_value(nameId)
-    if not nm or nm == "" then print("[official] teleport: empty name") return end
-    local me = myHRP()
-    if not me then print("[official] teleport: no local HRP") return end
-    local tpl = player_by_name(nm)
-    if not tpl then print("[official] teleport: no such player") return end
-    local tchar = tpl.ModelInstance or tpl.Character
-    if not tchar then print("[official] teleport: no target character") return end
-    local thrp = tchar:FindFirstChild("HumanoidRootPart") or get_rootpart(tchar)
-    if not thrp then print("[official] teleport: no target HRP") return end
-    local cf = get_cframe(thrp)
-    if not cf then print("[official] teleport: no target cframe") return end
-    stopRep()
-    repCF, repName, repLeft = cf, nm, 90
-    repId = on_tick(function()
-        if repLeft <= 0 then stopRep() return end
-        repLeft = repLeft - 1
-        -- Re-resolve the target every tick (it moves; a stale copy chases air).
-        local t2 = player_by_name(repName)
-        local tc2 = t2 and (t2.ModelInstance or t2.Character)
-        local th2 = tc2 and (tc2:FindFirstChild("HumanoidRootPart") or get_rootpart(tc2))
-        if th2 then
-            local dst = get_cframe(th2)
-            if dst then repCF = dst end
+
+local function targetCFrame(name)
+    local player = player_by_name(name)
+    local model = player and (player.ModelInstance or player.Character)
+    local root = model and (model:FindFirstChild("HumanoidRootPart") or get_rootpart(model))
+    local cf = root and get_cframe(root)
+    if type(cf) ~= "table" then return nil end
+    for i = 1, 12 do
+        local v = cf[i]
+        if type(v) ~= "number" or v ~= v or v == math.huge or v == -math.huge then
+            return nil
         end
-        local mine = myHRP()
-        if not mine then stopRep() return end
-        set_cframe(mine, repCF)
-        local x1, y1, z1 = hrpPos(mine)
-        if x1 and th2 then
-            local qx, qy, qz = hrpPos(th2)
-            if qx then
-                local dx, dy, dz = x1 - qx, y1 - qy, z1 - qz
-                if dx * dx + dy * dy + dz * dz < 64 then
-                    print("[official] teleport: arrived")
-                    stopRep()
+    end
+    return cf
+end
+
+local function positionOf(root)
+    if not root then return nil end
+    local value = get_prop(root:addr(), root.ClassName, "Position")
+    if type(value) ~= "table" then return nil end
+    local x, y, z = value.X, value.Y, value.Z
+    if type(x) ~= "number" or type(y) ~= "number" or type(z) ~= "number" then
+        return nil
+    end
+    return x, y, z
+end
+
+local function distanceSquared(ax, ay, az, bx, by, bz)
+    local dx, dy, dz = ax - bx, ay - by, az - bz
+    return dx * dx + dy * dy + dz * dz
+end
+
+local SLAM_SECONDS, VERIFY_SECONDS, MAX_TRIES = 0.4, 0.15, 6
+local TARGET_REFRESH_SECONDS, ROOT_REFRESH_SECONDS = 0.08, 0.1
+local ARRIVAL_DISTANCE_SQUARED = 9
+local tpId = ui_button("Teleport")
+local busy = false
+
+ui_on_pressed(tpId, function()
+    if busy then return end
+    busy = true
+
+    local ok, result = pcall(function()
+        local name = ui_input_value(nameId)
+        if not name or name == "" then return "empty name" end
+        if not targetCFrame(name) then return "no such player/character" end
+        print("[official] teleport: chasing " .. name)
+
+        for attempt = 1, MAX_TRIES do
+            local destination = targetCFrame(name)
+            local mine = myHRP()
+            if not destination or not mine then return "lost target or local root" end
+
+            local targetX, targetY, targetZ = destination[10], destination[11], destination[12]
+            local started = os.clock()
+            local nextTargetRefresh = started + TARGET_REFRESH_SECONDS
+            local nextRootRefresh = started + ROOT_REFRESH_SECONDS
+            local writes, successfulWrites = 0, 0
+            local alive = true
+
+            -- Dense writes are intentional: isolated transform writes are
+            -- reverted by the simulation before the body adopts the move.
+            while os.clock() - started < SLAM_SECONDS do
+                local now = os.clock()
+                if now >= nextTargetRefresh then
+                    local fresh = targetCFrame(name)
+                    if fresh then
+                        destination = fresh
+                        targetX, targetY, targetZ = fresh[10], fresh[11], fresh[12]
+                    end
+                    nextTargetRefresh = now + TARGET_REFRESH_SECONDS
                 end
+                if now >= nextRootRefresh then
+                    local freshRoot = myHRP()
+                    if not freshRoot then alive = false break end
+                    mine = freshRoot
+                    nextRootRefresh = now + ROOT_REFRESH_SECONDS
+                end
+
+                if set_cframe(mine, destination) then successfulWrites = successfulWrites + 1 end
+                writes = writes + 1
+            end
+
+            if alive and writes > 0 and successfulWrites > 0 then
+                -- Do not write during verification. A fresh root lookup also
+                -- prevents a respawn from making stale-instance reads look valid.
+                local verifyRoot = myHRP()
+                if verifyRoot and verifyRoot:addr() == mine:addr() then
+                    local samples, near = 0, 0
+                    local verifyStarted = os.clock()
+                    local nextSample = verifyStarted
+                    while os.clock() - verifyStarted < VERIFY_SECONDS do
+                        local now = os.clock()
+                        if now >= nextSample then
+                            local x, y, z = positionOf(verifyRoot)
+                            if x then
+                                samples = samples + 1
+                                if distanceSquared(x, y, z, targetX, targetY, targetZ)
+                                    < ARRIVAL_DISTANCE_SQUARED then
+                                    near = near + 1
+                                end
+                            end
+                            nextSample = now + 0.025
+                        end
+                    end
+                    if samples >= 3 and near / samples >= 0.8 then
+                        return "arrived (try " .. attempt .. ", " .. successfulWrites .. "/" .. writes .. " writes)"
+                    end
+                end
+            elseif not alive then
+                return "local character respawned during teleport"
             end
         end
+        return "gave up: destination did not hold after successful writes"
     end)
-    print("[official] teleport: chasing " .. nm)
+
+    busy = false
+    if ok then
+        print("[official] teleport: " .. result)
+    else
+        print("[official] teleport failed: " .. tostring(result))
+    end
 end)
+
 print("[official] teleport loaded")

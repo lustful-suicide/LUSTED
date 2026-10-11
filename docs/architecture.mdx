@@ -1,0 +1,44 @@
+---
+title: Code Architecture
+description: Module ownership, dependencies, and safe places to make changes.
+---
+
+LUSTED is split into five CMake targets with one-way dependencies. Each source folder owns one part of startup, runtime, process access, or presentation.
+
+## Dependency map
+
+```text
+lusted (app/main.cpp)
+|-- lusted_runtime
+|   |-- lusted_ui
+|   |   `-- lusted_roblox
+|   |       `-- lusted_process
+|   |-- lusted_roblox
+|   `-- Luau VM and compiler
+|-- lusted_ui
+|   `-- lusted_roblox
+|       `-- lusted_process
+|-- lusted_roblox
+`-- lusted_process
+```
+
+`lusted_process` owns Windows process-memory access. `lusted_roblox` owns player discovery, offsets, and the instance index built on that adapter. `lusted_ui` owns windows, widgets, the explorer, and drawing; the explorer consumes the Roblox instance interface. `lusted_runtime` owns the Luau state and its native bindings. `src/app/main.cpp` composes these modules and owns process lifetime.
+
+## Where changes belong
+
+| Change | Start here |
+| --- | --- |
+| Startup order, command line, or shutdown | `src/app/main.cpp` |
+| Windows process reads and writes | `src/platform/windows/memory.*` |
+| Player discovery, offsets, instance lookup, or properties | `src/roblox/` |
+| Luau globals, scripts, callbacks, or embedded libraries | `src/runtime/` |
+| Controls, explorer, or drawing presentation | `src/ui/` |
+| Shared logging | `src/support/` |
+
+Keep dependencies pointing inward toward the lower-level module. The app composes modules; process access does not depend on Roblox, UI, or runtime code. Put cross-module behavior behind the smallest interface that owns its invariants, and add an adapter only when a second real implementation needs that seam.
+
+## Build targets
+
+`lusted_process` exports the project include root. `lusted_roblox` depends on process access and its offset-data parser. `lusted_ui` depends on Roblox data and Dear ImGui. `lusted_runtime` depends on Roblox, UI, and Luau. The executable lists each module it composes because startup uses their interfaces directly. CMake excludes unused Luau analysis and command-line targets from the normal build.
+
+Use the source map in the repository README to find files. A change to a module should normally stay inside that folder and its CMake target. Update this page when a new target or dependency direction is introduced.

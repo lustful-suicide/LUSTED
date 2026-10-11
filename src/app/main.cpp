@@ -1,11 +1,11 @@
-#include "roblox_finder.h"
-#include "offsets_fetcher.h"
-#include "memory.h"
-#include "instance.h"
-#include "ui.h"
-#include "drawing.h"
-#include "luau_manager.h"
-#include "log.h"
+#include "roblox/roblox_finder.h"
+#include "roblox/offsets_fetcher.h"
+#include "platform/windows/memory.h"
+#include "roblox/instance.h"
+#include "ui/ui.h"
+#include "ui/drawing.h"
+#include "runtime/luau_manager.h"
+#include "support/log.h"
 #include <iostream>
 #include <filesystem>
 #include <fstream>
@@ -15,7 +15,6 @@
 #include <thread>
 #include <atomic>
 #include <vector>
-#include <nlohmann/json.hpp>
 
 static std::vector<std::filesystem::path> CollectLuas(const std::filesystem::path& dir) {
     std::vector<std::filesystem::path> out;
@@ -213,9 +212,6 @@ int main(int argc, char** argv) {
         std::cout << "[run] auto-execution done." << std::endl;
         LustedLog("auto-exec done");
         done = true;
-        // Tight poll cadence: per-frame features (noclip re-enforce vs server
-        // replication races, teleport spam) need as many ticks per second as
-        // cheap polling allows. TakeEvent/Poll work is microseconds.
         while (!once && !stop) {
             luau.Poll();
             Sleep(8);

@@ -1,11 +1,11 @@
-#include "luau_manager.h"
-#include "memory.h"
-#include "instance.h"
-#include "ui.h"
-#include "drawing.h"
-#include "roblox_finder.h"
-#include "offsets_fetcher.h"
-#include "luau_stdlib.h"
+#include "runtime/luau_manager.h"
+#include "platform/windows/memory.h"
+#include "roblox/instance.h"
+#include "ui/ui.h"
+#include "ui/drawing.h"
+#include "roblox/roblox_finder.h"
+#include "roblox/offsets_fetcher.h"
+#include "runtime/luau_stdlib.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -902,12 +902,19 @@ bool LuauManager::RescanRoblox() {
     if (!inst_ || !refreshed.Load(newOffsetsPath.string())) return false;
 
     const DWORD oldPid = pidOut_ ? *pidOut_ : 0;
-    if (mem_ && (!mem_->IsOpen() || oldPid != newPid) && !mem_->Attach(newPid)) {
-        if (oldPid) mem_->Attach(oldPid);
-        return false;
-    }
-    *inst_ = std::move(refreshed);
-    if (pidOut_) *pidOut_ = newPid;
+    bool attached = true;
+    auto replaceStore = [&]() {
+        if (mem_ && (!mem_->IsOpen() || oldPid != newPid) && !mem_->Attach(newPid)) {
+            if (oldPid) mem_->Attach(oldPid);
+            attached = false;
+            return;
+        }
+        *inst_ = std::move(refreshed);
+        if (pidOut_) *pidOut_ = newPid;
+    };
+    if (ui_) ui_->WithExplorerStoreExclusive(replaceStore);
+    else replaceStore();
+    if (!attached) return false;
     if (ui_) ui_->SetTargetPid(newPid);
     if (dr_) dr_->SetTargetPid(newPid);
     version_ = newVersion;

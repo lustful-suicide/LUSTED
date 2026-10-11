@@ -4,21 +4,28 @@
 #include <cstddef>
 #include <vector>
 
-// Custom memory engine. Never links/calls WriteProcessMemory. <--- THIS IS A LIE
-// Uses dynamically-resolved NTAPI (NtWriteVirtualMemory +
-// NtProtectVirtualMemory) with protect-restore + verify.
+// Reads and writes the target process through Windows NT memory APIs. Write
+// access is requested for the duration of each write and released immediately.
 class Memory {
 public:
     Memory() = default;
     ~Memory() { Detach(); }
+    Memory(const Memory&) = delete;
+    Memory& operator=(const Memory&) = delete;
+    Memory(Memory&&) = delete;
+    Memory& operator=(Memory&&) = delete;
 
     bool Attach(DWORD pid);
     void Detach();
     bool IsOpen() const { return hProc_ != nullptr; }
     HANDLE Handle() const { return hProc_; }
 
-    // Core custom write: protect -> NtWrite -> restore -> flush -> verify.
+    // Write bytes to the target and verify the result.
     bool CustomWrite(uintptr_t address, const void* data, size_t size);
+    // Write bytes and confirm the full transfer without a read-back. Intended
+    // for latency-sensitive transform updates where a second read races the
+    // target's own simulation and success logging would dominate the write.
+    bool CustomWriteFast(uintptr_t address, const void* data, size_t size);
     bool CustomRead(uintptr_t address, void* out, size_t size);
 
     template <typename T>
@@ -36,4 +43,6 @@ public:
 private:
     HANDLE hProc_ = nullptr;
     DWORD pid_ = 0;
+    bool CustomWriteImpl(uintptr_t address, const void* data, size_t size,
+                         bool verify, bool logSuccess);
 };

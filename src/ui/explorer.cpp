@@ -1,7 +1,7 @@
-#include "explorer.h"
-#include "instance.h"
+#include "ui/explorer.h"
+#include "roblox/instance.h"
 #include "imgui.h"
-#include "log.h"
+#include "support/log.h"
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -99,6 +99,7 @@ void Explorer::LoaderLoop() {
             }
         }
         if (!haveWork) {
+            std::shared_lock storeLock(storeAccessMutex_);
             if (open_.load()) RefreshExpanded();
             continue;
         }
@@ -107,16 +108,19 @@ void Explorer::LoaderLoop() {
         std::vector<uintptr_t> kids;
         std::vector<std::string> names, clss;
         size_t found = 0;
-        if (store_ && addr) {
-            kids = store_->GetChildren(addr, true);
-            if (kids.size() > kMaxKids) kids.resize(kMaxKids);
-            names.resize(kids.size());
-            clss.resize(kids.size());
-            for (size_t i = 0; i < kids.size(); ++i) {
-                names[i] = store_->GetName(kids[i]);
-                clss[i] = store_->GetClass(kids[i]);
+        {
+            std::shared_lock storeLock(storeAccessMutex_);
+            if (store_ && addr) {
+                kids = store_->GetChildren(addr, true);
+                if (kids.size() > kMaxKids) kids.resize(kMaxKids);
+                names.resize(kids.size());
+                clss.resize(kids.size());
+                for (size_t i = 0; i < kids.size(); ++i) {
+                    names[i] = store_->GetName(kids[i]);
+                    clss[i] = store_->GetClass(kids[i]);
+                }
+                found = kids.size();
             }
-            found = kids.size();
         }
         {
             std::lock_guard<std::mutex> lk(mtx_);
@@ -145,6 +149,16 @@ Explorer::~Explorer() {
     stopLoader_.store(true);
     qcv_.notify_all();
     if (loader_.joinable()) loader_.join();
+}
+
+void Explorer::WithStoreExclusive(const std::function<void()>& action) {
+    std::unique_lock lock(storeAccessMutex_);
+    action();
+}
+
+void Explorer::SetStore(InstanceStore* store) {
+    std::unique_lock lock(storeAccessMutex_);
+    store_ = store;
 }
 
 void Explorer::RefreshExpanded() {
@@ -290,6 +304,7 @@ void Explorer::DrawNode(uintptr_t addr, int depth) {
 }
 
 void Explorer::Render() {
+    std::shared_lock storeLock(storeAccessMutex_);
     if (!open_.load() || !store_) return;
     DWORD pid = pid_ ? *pid_ : 0;
     if (!pid) return;

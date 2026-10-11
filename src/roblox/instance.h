@@ -17,7 +17,21 @@
 
 class Memory;
 
-enum class PropType { None, F32, U32, I32, U64, Bool, Ptr, Vec3, Vec2, C3, String, RbxString, CF };
+enum class PropType {
+    None,
+    F32,
+    U32,
+    I32,
+    U64,
+    Bool,
+    Ptr,
+    Vec3,
+    Vec2,
+    C3,
+    String,
+    RbxString,
+    CF,
+};
 
 struct PropInfo {
     PropType type = PropType::None;
@@ -130,7 +144,8 @@ public:
     // in sync or the server kicks. Case-insensitive, best-effort on mirrors.
     bool WritePropFloatMirrored(uintptr_t inst, const std::string& cls, const std::string& member, float value) const;
     std::optional<int64_t> OffsetOfInsensitive(const std::string& cls, const std::string& member) const;
-    bool ReadPropVec3(const PropInfo& p, uintptr_t inst, float out[3]) const;    bool WritePropVec3(const PropInfo& p, uintptr_t inst, const float v[3]) const;
+    bool ReadPropVec3(const PropInfo& p, uintptr_t inst, float out[3]) const;
+    bool WritePropVec3(const PropInfo& p, uintptr_t inst, const float v[3]) const;
     // CFrame = Primitive.Rotation (9 floats) immediately followed by
     // Primitive.Position (3 floats); resolved as one contiguous 48-byte block.
     bool ReadPropCFrame(const PropInfo& p, uintptr_t inst, float out[12]) const;
@@ -215,6 +230,7 @@ private:
     std::unordered_map<uintptr_t, std::pair<std::string, std::string>> nameCache_;
 
     // ---- property helpers ----
+    static std::string LowerKey(const std::string& value);
     std::vector<std::string> ClassChain(const std::string& cls) const;
     const std::vector<std::string>& SubObjectClasses() const { return subClasses_; }
     // uncached body of ResolveProp; table_ is immutable after Load()

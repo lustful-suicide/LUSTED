@@ -8,8 +8,9 @@
 #include <unordered_map>
 #include <vector>
 #include <mutex>
+#include <functional>
 #include <cstdint>
-#include "explorer.h"
+#include "ui/explorer.h"
 
 // Polling UI docked next to the Roblox window (TOPMOST tool window).
 class UiManager {
@@ -64,6 +65,9 @@ public:
 
     // Standalone Explorer window (see explorer.h/cpp): tree + click-to-props.
     void SetExplorerStore(class InstanceStore* store) { explorer_.SetStore(store); }
+    void WithExplorerStoreExclusive(const std::function<void()>& action) {
+        explorer_.WithStoreExclusive(action);
+    }
     void SetExplorerPid(DWORD* pid) { explorer_.SetPidPtr(pid); }
     void SetExplorerOpen(bool open) { explorer_.SetOpen(open); }
     bool IsExplorerOpen() const { return explorer_.IsOpen(); }

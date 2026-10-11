@@ -23,9 +23,8 @@ public:
     bool RunString(const std::string& chunkName, const std::string& source);
     bool RegisterButtonCallback(int id, int functionIndex);
     bool RegisterControlCallback(int id, int functionIndex);
-    // Per-frame tick callbacks (~60Hz from the worker Poll loop): the missing
-    // primitive for server-fought features (noclip re-enforce on jump,
-    // teleport spam against rubberband). Errors unregister + log, never loop.
+    // Callbacks run on the worker thread during Poll. A failing callback is
+    // logged and removed so it cannot fail on every later poll.
     int RegisterTickCallback(int functionIndex);
     bool RemoveTickCallback(int id);
     bool RescanRoblox();

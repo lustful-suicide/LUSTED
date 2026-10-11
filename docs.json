@@ -12,6 +12,11 @@
           "icon": "rocket"
         },
         {
+          "title": "Code Architecture",
+          "href": "/architecture",
+          "icon": "code"
+        },
+        {
           "title": "Runtime Data and Settings",
           "href": "/runtime-data",
           "icon": "database"
