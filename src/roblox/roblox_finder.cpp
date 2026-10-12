@@ -1,7 +1,8 @@
 #include "roblox/roblox_finder.h"
+#include "platform/windows/process.h"
+#include "platform/windows/syscalls.h"
 #include <filesystem>
 #include <cstdlib>
-#include <tlhelp32.h>
 
 namespace fs = std::filesystem;
 
@@ -33,45 +34,46 @@ std::string GetExeFileVersion(const std::string& exePath) {
 }
 
 DWORD FindRobloxPid() {
-    DWORD pid = 0;
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == INVALID_HANDLE_VALUE) return 0;
-    PROCESSENTRY32 pe{};
-    pe.dwSize = sizeof(pe);
-    if (Process32First(snap, &pe)) {
-        do {
-#ifdef UNICODE
-            if (_wcsicmp(pe.szExeFile, L"RobloxPlayerBeta.exe") == 0) {
-#else
-            if (_stricmp(pe.szExeFile, "RobloxPlayerBeta.exe") == 0) {
-#endif
-                pid = pe.th32ProcessID;
-                break;
-            }
-        } while (Process32Next(snap, &pe));
+    // One system-process snapshot; the image name rides along per
+    // process, so no per-process open is needed to match the exe name.
+    std::vector<ProcEntry> procs;
+    if (!ProcListAll(procs)) return 0;
+    for (const auto& p : procs) {
+        const char* exe = p.imageNt.c_str();
+        const char* slash = exe;
+        for (const char* q = exe; *q; ++q)
+            if (*q == '\\' || *q == '/') slash = q + 1;
+        if (_stricmp(slash, "RobloxPlayerBeta.exe") == 0) return p.pid;
     }
-    CloseHandle(snap);
-    return pid;
+    return 0;
 }
 
 std::optional<RobloxInstall> FindRobloxPlayer() {
     // 1) Live process image path (most accurate when running).
     DWORD pid = FindRobloxPid();
     if (pid) {
-        HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-        if (h) {
-            char buf[MAX_PATH] = {};
-            DWORD n = sizeof(buf);
-            if (QueryFullProcessImageNameA(h, 0, buf, &n) && n) {
-                CloseHandle(h);
+        SysObjectAttributes oa{};
+        oa.Length = sizeof(oa);
+        SysClientId cid{};
+        cid.UniqueProcess = (HANDLE)(ULONG_PTR)pid;
+        HANDLE h = nullptr;
+        SysCount(kScOpen);
+        if (SYS_OK(ProcOpen(&h, PROCESS_QUERY_LIMITED_INFORMATION, &oa,
+                                            &cid)) &&
+            h) {
+            std::string path;
+            if (ProcImagePath(h, path) && !path.empty()) {
+                SysCount(kScClose);
+                HandleClose(h);
                 RobloxInstall r;
-                r.exePath = buf;
+                r.exePath = path;
                 r.versionHash = ExtractVersionHash(r.exePath);
                 r.fileVersion = GetExeFileVersion(r.exePath);
                 r.pid = pid;
                 return r;
             }
-            CloseHandle(h);
+            SysCount(kScClose);
+            HandleClose(h);
         }
     }
     // 2) Scan %LOCALAPPDATA%\Roblox\Versions\version-*\RobloxPlayerBeta.exe

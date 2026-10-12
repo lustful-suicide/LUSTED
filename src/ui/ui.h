@@ -65,6 +65,7 @@ public:
 
     // Standalone Explorer window (see explorer.h/cpp): tree + click-to-props.
     void SetExplorerStore(class InstanceStore* store) { explorer_.SetStore(store); }
+    void DetachExplorerStore() { explorer_.ClearStore(); }
     void WithExplorerStoreExclusive(const std::function<void()>& action) {
         explorer_.WithStoreExclusive(action);
     }

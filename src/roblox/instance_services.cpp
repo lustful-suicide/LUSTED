@@ -1,5 +1,7 @@
 #include "roblox/instance.h"
 #include "platform/windows/memory.h"
+#include "platform/windows/process.h"
+#include "platform/windows/syscalls.h"
 #include "support/log.h"
 #include <fstream>
 #include <thread>
@@ -9,7 +11,6 @@
 #include <cstring>
 #include <iostream>
 #include <sstream>
-#include <tlhelp32.h>
 #include <immintrin.h>
 #include <nlohmann/json.hpp>
 
@@ -227,23 +228,23 @@ uintptr_t InstanceStore::GetRootPart(DWORD pid) {
 }
 
 bool InstanceStore::ModuleInfo(DWORD pid, const std::string& mod, uintptr_t& base, size_t& size) {
+    // Remote PEB_LDR walk behind direct syscalls: open (scoped handle),
+    // resolve, drop. No Toolhelp snapshot, no kernel32 on the path.
     base = 0; size = 0;
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
-    if (snap == INVALID_HANDLE_VALUE) return false;
-    MODULEENTRY32 me{};
-    me.dwSize = sizeof(me);
-    bool ok = false;
-    if (Module32First(snap, &me)) do {
-#ifdef UNICODE
-        std::wstring w(mod.begin(), mod.end());
-        if (_wcsicmp(me.szModule, w.c_str()) == 0) {
-#else
-        if (_stricmp(me.szModule, mod.c_str()) == 0) {
-#endif
-            base = (uintptr_t)me.modBaseAddr; size = me.modBaseSize; ok = true; break;
-        }
-    } while (Module32Next(snap, &me));
-    CloseHandle(snap);
+    if (!SysEnsureResolved() || !pid) return false;
+    SysObjectAttributes oa{};
+    oa.Length = sizeof(oa);
+    SysClientId cid{};
+    cid.UniqueProcess = (HANDLE)(ULONG_PTR)pid;
+    HANDLE h = nullptr;
+    SysCount(kScOpen);
+    if (!SYS_OK(ProcOpen(&h, PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+                                         &oa, &cid)) ||
+        !h)
+        return false;
+    const bool ok = ModuleLocate(h, mod.c_str(), base, size);
+    SysCount(kScClose);
+    HandleClose(h);
     return ok;
 }
 uintptr_t InstanceStore::ModuleBase(DWORD pid, const std::string& mod) {

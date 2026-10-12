@@ -1,42 +1,53 @@
 #include "platform/windows/memory.h"
+#include "platform/windows/syscalls.h"
 #include "support/log.h"
-#include <iostream>
+#include <cstdio>
+#include <cstring>
+#include <vector>
 
-typedef LONG NTSTATUS;
-#define NT_SUCCESS(s) ((NTSTATUS)(s) >= 0)
-typedef NTSTATUS(NTAPI* NtWriteVirtualMemory_t)(HANDLE, PVOID, PVOID, SIZE_T, PSIZE_T);
-typedef NTSTATUS(NTAPI* NtReadVirtualMemory_t)(HANDLE, PVOID, PVOID, SIZE_T, PSIZE_T);
-typedef NTSTATUS(NTAPI* NtProtectVirtualMemory_t)(HANDLE, PVOID*, PSIZE_T, ULONG, PULONG);
-
-static NtWriteVirtualMemory_t pNtWrite = nullptr;
-static NtReadVirtualMemory_t pNtRead = nullptr;
-static NtProtectVirtualMemory_t pNtProtect = nullptr;
-
-static bool ResolveNt() {
-    if (pNtWrite && pNtRead && pNtProtect) return true;
-    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
-    if (!ntdll) return false;
-    pNtWrite   = (NtWriteVirtualMemory_t)GetProcAddress(ntdll, "NtWriteVirtualMemory");
-    pNtRead    = (NtReadVirtualMemory_t)GetProcAddress(ntdll, "NtReadVirtualMemory");
-    pNtProtect = (NtProtectVirtualMemory_t)GetProcAddress(ntdll, "NtProtectVirtualMemory");
-    return pNtWrite && pNtRead && pNtProtect;
-}
+// Every kernel transition here is a raw `syscall` from our own image (see
+// syscalls_gas.S / syscalls_masm.asm). Nothing calls into ntdll, kernel32's
+// OpenProcess/CloseHandle/FlushInstructionCache wrappers, or any OS export,
+// so user-mode hooks on those entry points never execute. SSNs resolve once
+// via SysEnsureResolved() because the numbers move between Windows builds.
 
 bool Memory::Attach(DWORD pid) {
     Detach();
-    if (!ResolveNt()) return false;
+    if (!SysEnsureResolved()) return false;
     // Read-only rights for the handle we hold for the process lifetime.
     // Write rights are taken and dropped inside CustomWrite instead, so the
     // process never sits on a VM_WRITE handle while idle.
-    HANDLE h = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, pid);
-    if (!h) return false;
+    SysObjectAttributes oa{};
+    oa.Length = sizeof(oa);
+    SysClientId cid{};
+    cid.UniqueProcess = (HANDLE)(ULONG_PTR)pid;
+    HANDLE h = nullptr;
+    SysCount(kScOpen);
+    SysStatus st =
+        ProcOpen(&h, PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, &oa, &cid);
+    if (!SYS_OK(st) || !h) return false;
     hProc_ = h; pid_ = pid;
-    LustedLogf("attach pid=%lu rights=READ|QUERY", (unsigned long)pid);
+    LustedLogf("attach pid=%lu rights=READ|QUERY via=syscall", (unsigned long)pid);
     return true;
 }
 
 void Memory::Detach() {
-    if (hProc_) { CloseHandle(hProc_); hProc_ = nullptr; pid_ = 0; LustedLog("detach"); LustedLogFlush(); }
+    if (hProc_) {
+        SysCount(kScClose);
+        HandleClose(hProc_);
+        hProc_ = nullptr; pid_ = 0;
+        SysCallTotals totals{};
+        SysCallTotalsSnapshot(totals);
+        LustedLogf("detach traps open=%llu close=%llu read=%llu write=%llu readFull=%llu "
+                   "writeFull=%llu protect=%llu flush=%llu sysq=%llu procq=%llu memq=%llu "
+                   "linkopen=%llu linkq=%llu",
+                   totals.n[kScOpen], totals.n[kScClose], totals.n[kScRead],
+                   totals.n[kScWrite], totals.n[kScReadFull], totals.n[kScWriteFull],
+                   totals.n[kScProtect], totals.n[kScFlush], totals.n[kScSysQuery],
+                   totals.n[kScProcQuery], totals.n[kScMemQuery], totals.n[kScLinkOpen],
+                   totals.n[kScLinkQuery]);
+        LustedLogFlush();
+    }
 }
 
 bool Memory::CustomWrite(uintptr_t address, const void* data, size_t size) {
@@ -50,7 +61,7 @@ bool Memory::CustomWriteFast(uintptr_t address, const void* data, size_t size) {
 bool Memory::CustomWriteImpl(uintptr_t address, const void* data, size_t size,
                              bool verify, bool logSuccess) {
     if (!IsOpen() || !address || !data || !size) return false;
-    if (!ResolveNt()) return false;
+    if (!SysEnsureResolved()) return false;
 
     // Phase timers: anything over a millisecond is logged with its breakdown so
     // the slow phase is named instead of guessed at.
@@ -63,48 +74,55 @@ bool Memory::CustomWriteImpl(uintptr_t address, const void* data, size_t size,
     if (measure) QueryPerformanceCounter(&ta);
 
     // Write rights are scoped to this call: open, use, drop.
-    HANDLE hw = OpenProcess(PROCESS_VM_WRITE | PROCESS_VM_OPERATION, FALSE, pid_);
-    if (!hw) {
+    SysObjectAttributes oa{};
+    oa.Length = sizeof(oa);
+    SysClientId cid{};
+    cid.UniqueProcess = (HANDLE)(ULONG_PTR)pid_;
+    HANDLE hw = nullptr;
+    SysCount(kScOpen);
+    if (!SYS_OK(ProcOpen(&hw, PROCESS_VM_WRITE | PROCESS_VM_OPERATION,
+                                         &oa, &cid)) ||
+        !hw) {
         LustedLogf("write OPENFAIL addr=0x%llx size=%zu", (unsigned long long)address, size);
         return false;
     }
 
-    // No VirtualQueryEx here: against a live target it measured 1.3-26 ms per
-    // call, which dwarfs the write itself. NtWriteVirtualMemory is tried first
-    // and the protect/restore dance only runs when it comes up short - that is
-    // also exactly when the page is a non-writable (code) page, so the cache
-    // flush below lands where it belongs.
-    auto writeOnce = [&](size_t from) -> SIZE_T {
-        const uint8_t* src = (const uint8_t*)data;
-        SIZE_T total = 0;
-        while (from + total < size) {
-            SIZE_T w = 0;
-            NTSTATUS st = pNtWrite(hw, (PVOID)(address + from + total),
-                                   (PVOID)(src + from + total), size - from - total, &w);
-            if (!NT_SUCCESS(st) || w == 0) break;
-            total += w;
-        }
-        return total;
+    // No region query here: against a live target it measured 1.3-26 ms per
+    // call, which dwarfs the write itself. The hand-written MemWriteFull loop
+    // is tried first and the protect/restore dance only runs when it comes up
+    // short - that is also exactly when the page is a non-writable (code)
+    // page, so the cache flush below lands where it belongs.
+    const uint8_t* src = (const uint8_t*)data;
+    auto writeRange = [&](size_t from) -> SIZE_T {
+        SIZE_T moved = 0;
+        SysCount(kScWriteFull);
+        MemWriteFull(hw, (PVOID)(address + from), (PVOID)(src + from),
+                     size - from, &moved);
+        return moved;
     };
 
-    SIZE_T done = writeOnce(0);
+    SIZE_T done = writeRange(0);
     bool didProtect = false;
     bool protectionRestored = true;
     if (done != size) {
         PVOID base = (PVOID)address;
         SIZE_T region = size;
         ULONG oldProt = 0;
-        if (NT_SUCCESS(pNtProtect(hw, &base, &region, PAGE_EXECUTE_READWRITE, &oldProt))) {
-            const SIZE_T retry = writeOnce(done);
-            done += retry;
+        SysCount(kScProtect);
+        if (SYS_OK(MemProtect(hw, &base, &region,
+                                                     PAGE_EXECUTE_READWRITE, &oldProt))) {
+            done += writeRange(done);
             PVOID rb = (PVOID)address; SIZE_T rs = size; ULONG tmp = 0;
-            protectionRestored = NT_SUCCESS(
-                pNtProtect(hw, &rb, &rs, oldProt ? oldProt : PAGE_EXECUTE_READ, &tmp));
-            FlushInstructionCache(hw, (LPCVOID)address, size);
+            SysCount(kScProtect);
+            protectionRestored = SYS_OK(MemProtect(
+                hw, &rb, &rs, oldProt ? oldProt : PAGE_EXECUTE_READ, &tmp));
+            SysCount(kScFlush);
+            CacheFlush(hw, (PVOID)address, size);
             didProtect = true;
         }
     }
-    CloseHandle(hw);
+    SysCount(kScClose);
+    HandleClose(hw);
     if (measure) QueryPerformanceCounter(&tb);
 
     if (!protectionRestored) {
@@ -139,10 +157,11 @@ bool Memory::CustomWriteImpl(uintptr_t address, const void* data, size_t size,
 
 bool Memory::CustomRead(uintptr_t address, void* out, size_t size) {
     if (!IsOpen() || !address || !out || !size) return false;
-    if (!ResolveNt()) return false;
+    if (!SysEnsureResolved()) return false;
     SIZE_T r = 0;
-    NTSTATUS st = pNtRead(hProc_, (PVOID)address, out, size, &r);
-    return NT_SUCCESS(st) && r == size;
+    SysCount(kScReadFull);
+    const SysStatus st = MemReadFull(hProc_, (PVOID)address, out, size, &r);
+    return SYS_OK(st) && r == size;
 }
 
 uintptr_t Memory::Scan(const uint8_t* pattern, const char* mask, uintptr_t begin, size_t len) {

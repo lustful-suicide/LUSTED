@@ -1,0 +1,351 @@
+#pragma once
+
+inline constexpr char kInstanceLibrary[] = R"LUA(
+local Vector3Meta = {}
+Vector3Meta.__index = Vector3Meta
+Vector3Meta.__tostring = function(v)
+    return string.format("%.2f, %.2f, %.2f", v.X, v.Y, v.Z)
+end
+Vector3Meta.__add = function(a, b) return Vector3(a.X + b.X, a.Y + b.Y, a.Z + b.Z) end
+Vector3Meta.__sub = function(a, b) return Vector3(a.X - b.X, a.Y - b.Y, a.Z - b.Z) end
+Vector3Meta.__mul = function(a, b)
+    if type(b) == "number" then return Vector3(a.X * b, a.Y * b, a.Z * b) end
+    return Vector3(a.X * b.X, a.Y * b.Y, a.Z * b.Z)
+end
+Vector3Meta.__div = function(a, b)
+    if type(b) == "number" then return Vector3(a.X / b, a.Y / b, a.Z / b) end
+    return Vector3(a.X / b.X, a.Y / b.Y, a.Z / b.Z)
+end
+Vector3Meta.__eq = function(a, b) return a.X == b.X and a.Y == b.Y and a.Z == b.Z end
+Vector3Meta.__len = function(v) return math.sqrt(v.X * v.X + v.Y * v.Y + v.Z * v.Z) end
+Vector3Meta.Magnitude = function(self) return math.sqrt(self.X * self.X + self.Y * self.Y + self.Z * self.Z) end
+Vector3Meta.Dot = function(self, other) return self.X * other.X + self.Y * other.Y + self.Z * other.Z end
+Vector3Meta.Unit = function(self)
+    local m = self:Magnitude()
+    if m == 0 then return Vector3(0, 0, 0) end
+    return Vector3(self.X / m, self.Y / m, self.Z / m)
+end
+
+-- Instance is intentionally GLOBAL (not local): feature scripts wrap raw
+-- addresses via Instance.from, and a local would make every such call fail
+-- with "attempt to index nil with 'from'".
+Instance = {}
+Instance.__index = Instance
+
+function Instance.from(address)
+    assert(address ~= nil, "nil instance address")
+    return setmetatable({ _address = address }, Instance)
+end
+
+function Instance:addr()
+    return self._address
+end
+
+function Instance:GetParent()
+    local address = get_parent(self._address)
+    return address and Instance.from(address) or nil
+end
+
+function Instance:GetChildren()
+    local result = {}
+    for _, address in ipairs(get_children(self._address) or {}) do
+        result[#result + 1] = Instance.from(address)
+    end
+    return result
+end
+
+function Instance:GetDescendants()
+    local result = {}
+    for _, address in ipairs(get_descendants(self._address) or {}) do
+        result[#result + 1] = Instance.from(address)
+    end
+    return result
+end
+
+function Instance:FindFirstChild(name, recursive)
+    if not recursive then
+        local address = find_first_child(self._address, name)
+        if address == nil and type(name) == "string" then
+            -- Workspace.<CharacterName> idiom (see __index fallback below).
+            local chAddr = get_character()
+            if chAddr ~= nil and get_name(chAddr) == name then address = chAddr end
+        end
+        return address and Instance.from(address) or nil
+    end
+    for _, descendant in ipairs(self:GetDescendants()) do
+        if descendant.Name == name then return descendant end
+    end
+    return nil
+end
+
+function Instance:FindFirstChildOfClass(className)
+    local address = find_first_child_of_class(self._address, className)
+    return address and Instance.from(address) or nil
+end
+
+function Instance:WaitForChild(name, timeout)
+    local address = wait_for_child(self._address, name, timeout or 5000)
+    return address and Instance.from(address) or nil
+end
+
+function Instance:GetService(name)
+    if type(name) ~= "string" or name == "" then return nil end
+    local address = find_first_child(self._address, name)
+    if address == nil then
+        -- services sometimes carry a versioned display name; fall back to class
+        address = find_first_child_of_class(self._address, name)
+    end
+    return address and Instance.from(address) or nil
+end
+
+function Instance:Resolve(path)
+    local address = resolve_path(self._address, path)
+    return address and Instance.from(address) or nil
+end
+
+function Instance:GetProperty(className, memberName)
+    return get_prop(self._address, className or self.ClassName, memberName)
+end
+
+function Instance:SetProperty(className, memberName, value)
+    return set_prop(self._address, className or self.ClassName, memberName, value)
+end
+
+function Instance:HasProperty(memberName)
+    return has_prop(self.ClassName, memberName)
+end
+
+function Instance:PropOffset(memberName)
+    return prop_offset(self.ClassName, memberName)
+end
+
+-- Instances print as a name/class rather than "table: 0x...", so a failed
+-- property read is visible instead of looking like an unresolved instance.
+Instance.__tostring = function(self)
+    local a = self._address
+    if a == nil then return "Instance<nil>" end
+    local okN, name = pcall(get_name, a)
+    local okC, cls = pcall(get_classname, a)
+    name = (okN and type(name) == "string") and name or ""
+    cls = (okC and type(cls) == "string") and cls or ""
+    if name == "" and cls == "" then return "Instance(" .. tostring(a) .. ")" end
+    if cls == "" then return name end
+    if name == "" then return cls end
+    return name .. " [" .. cls .. "]"
+end
+
+-- property -> child -> nil
+Instance.__index = function(self, key)
+    local method = rawget(Instance, key)
+    if method ~= nil then return method end
+    if key == "Name" then return get_name(self._address) end
+    if key == "ClassName" then return get_classname(self._address) end
+    if key == "Parent" then return self:GetParent() end
+    if key == "Children" then return self:GetChildren() end
+    local address = self._address
+    -- LocalPlayer is authoritative via the dedicated binding (the generic
+    -- property path can mistype it on some dumps and return a boolean).
+    if key == "LocalPlayer" and get_classname(address) == "Players" then
+        local lp = get_localplayer()
+        if type(lp) == "string" and lp:match("^0x") then
+            return Instance.from(lp)
+        end
+        return nil
+    end
+    -- Character is a pointer property stored as ModelInstance in the dump:
+    -- resolve the alias here so player.Character never needs a tree walk
+    -- (it is a property, not a child; child lookup below would miss it).
+    if key == "Character" then
+        local direct = get_prop(address, get_classname(address), "Character")
+        if type(direct) == "string" and direct:match("^0x") then
+            return Instance.from(direct)
+        end
+        local model = get_prop(address, get_classname(address), "ModelInstance")
+        if type(model) == "string" and model:match("^0x") then
+            return Instance.from(model)
+        end
+    end
+    local value = get_prop(address, get_classname(address), key)
+    if value ~= nil then
+        if type(value) == "string" and value:match("^0x") then
+            return Instance.from(value)
+        end
+        return value
+    end
+    -- Misses stay on the full lookup: the startup index is gated complete,
+    -- so a miss here is either streaming in (sweep-gated, throttled to one
+    -- pass per window shared across missers) or genuinely absent.
+    local child = find_first_child(address, key)
+    if child == nil and type(key) == "string" then
+        -- Workspace.<CharacterName> idiom for speed scripts
+        -- (workspace.char.Humanoid): the character Model is transitionally
+        -- unparented while dying/streaming but its pointer stays live, so a
+        -- pure tree lookup misses what get_character still resolves.
+        local chAddr = get_character()
+        if chAddr ~= nil and get_name(chAddr) == key then
+            child = chAddr
+        elseif key == "Humanoid" then
+            -- char.Humanoid while the Humanoid hasn't streamed in as a child:
+            -- hand back the live Humanoid when self IS the character.
+            local hAddr = get_humanoid()
+            if hAddr ~= nil and chAddr ~= nil and address == chAddr then
+                child = hAddr
+            end
+        end
+    end
+    return child and Instance.from(child) or nil
+end
+
+function refresh_game()
+    local dataModel = get_datamodel()
+    game = dataModel and Instance.from(dataModel) or nil
+    local workspaceAddress = get_workspace()
+    workspace = workspaceAddress and Instance.from(workspaceAddress) or
+        (game and game:FindFirstChild("Workspace"))
+    players = game and game:FindFirstChild("Players") or nil
+    local playerAddress = get_localplayer()
+    localplayer = playerAddress and Instance.from(playerAddress) or nil
+    local characterAddress = get_character()
+    character = characterAddress and Instance.from(characterAddress) or nil
+    local humanoidAddress = get_humanoid()
+    humanoid = humanoidAddress and Instance.from(humanoidAddress) or nil
+    return game
+end
+
+function get_health(instance)
+    instance = instance or humanoid
+    return instance and get_prop_float(instance:addr(), "Humanoid", "Health") or nil
+end
+
+function set_walkspeed(value, instance)
+    instance = instance or humanoid
+    if not instance then return false end
+    -- the raw setter mirrors Walkspeed -> WalkspeedCheck, so one call covers both
+    return set_prop_float(instance:addr(), "Humanoid", "Walkspeed", value)
+end
+
+-- CFrame block: {r00..r22, px, py, pz}
+function get_cframe(instance)
+    if not instance then return nil end
+    local addr = instance.addr and instance:addr() or instance
+    return raw_get_cframe(addr, get_classname(addr))
+end
+
+function set_cframe(instance, cf)
+    if not instance or type(cf) ~= "table" then return false end
+    local addr = instance.addr and instance:addr() or instance
+    return raw_set_cframe(addr, get_classname(addr), cf)
+end
+
+-- position-only write; keeps the current rotation block intact
+function set_position(instance, x, y, z)
+    if not instance then return false end
+    local addr = instance.addr and instance:addr() or instance
+    return set_prop(addr, get_classname(addr), "Position", { X = x, Y = y, Z = z })
+end
+
+function get_position(instance)
+    if not instance then return nil end
+    local addr = instance.addr and instance:addr() or instance
+    return get_prop(addr, get_classname(addr), "Position")
+end
+
+function set_jumppower(value, instance)
+    instance = instance or humanoid
+    if not instance then return false end
+    -- mirrored to JumpHeight by the raw setter
+    return set_prop_float(instance:addr(), "Humanoid", "JumpPower", value)
+end
+
+function get_rootpart(instance)
+    -- Fresh character every call: the captured global goes stale across
+    -- respawns, and speed/teleport must follow the live rig.
+    if not instance then
+        local ca = get_character()
+        instance = (ca and Instance.from(ca)) or character
+    end
+    if instance then
+        local part = instance:FindFirstChild("HumanoidRootPart")
+        if part then return part end
+        -- R6 nests the root part one level down under Torso.
+        for _, limb in ipairs(instance:GetChildren()) do
+            local nested = limb:FindFirstChild("HumanoidRootPart")
+            if nested then return nested end
+        end
+    end
+    local address = raw_get_rootpart()
+    return address and Instance.from(address) or nil
+end
+
+function print_tree(instance, depth)
+    instance = instance or game
+    depth = depth or 2
+    local function visit(node, level)
+        if level > depth then return end
+        print(string.rep("  ", level) .. tostring(node.Name) .. " [" .. tostring(node.ClassName) .. "]")
+        for _, child in ipairs(node:GetChildren()) do visit(child, level + 1) end
+    end
+    if instance then visit(instance, 0) end
+end
+
+-- Vector3 helpers (returned tables from get_prop)
+function Vector3(x, y, z)
+    return setmetatable({ X = x or 0, Y = y or 0, Z = z or 0 }, Vector3Meta)
+end
+function IsVector3(value)
+    return type(value) == "table" and getmetatable(value) == Vector3Meta
+end
+
+function get_players()
+    local result = {}
+    for _, address in ipairs(raw_get_players() or {}) do
+        result[#result + 1] = Instance.from(address)
+    end
+    return result
+end
+
+function get_player_count()
+    return raw_get_player_count()
+end
+
+function player_by_name(target)
+    target = tostring(target):lower()
+    for _, player in ipairs(get_players()) do
+        if tostring(player.Name):lower() == target then return player end
+    end
+    return nil
+end
+
+-- HumanoidRootPart of any player (or a Character model).
+function get_player_root(target)
+    local player = type(target) == "string" and player_by_name(target) or target
+    if not player then return nil end
+    -- ModelInstance is the stored pointer (instant); Character is derived, so
+    -- resolving it first costs a full tree walk for the same answer.
+    local char = player.ModelInstance or player.Character
+    if not char then return nil end
+    return get_rootpart(char)
+end
+
+-- Copy a target's HumanoidRootPart CFrame onto the local one.
+function tp_to(target)
+    local dest = get_player_root(target)
+    if not dest then return false, "no target root" end
+    local mine = get_rootpart(character)
+    if not mine then return false, "no local root" end
+    local cf = get_cframe(dest)
+    if not cf then return false, "no target cframe" end
+    return set_cframe(mine, cf)
+end
+
+function refresh_index(force)
+    return raw_refresh_index(force == true)
+end
+
+function index_stats()
+    return raw_index_stats()
+end
+
+refresh_game()
+print("[stdlib] Instance loaded; game=" .. tostring(game and game:addr()))
+)LUA";

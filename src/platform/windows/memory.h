@@ -4,8 +4,10 @@
 #include <cstddef>
 #include <vector>
 
-// Reads and writes the target process through Windows NT memory APIs. Write
-// access is requested for the duration of each write and released immediately.
+// Reads and writes the target process through raw syscalls issued from our own
+// image (see syscalls.h). No WinAPI/syscall wrapper is called on the memory path.
+// Write access is requested for the duration of each write and released
+// immediately.
 class Memory {
 public:
     Memory() = default;

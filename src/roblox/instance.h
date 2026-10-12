@@ -10,6 +10,7 @@
 #include <shared_mutex>
 #include <atomic>
 #include <mutex>
+#include <chrono>
 #include <windows.h>
 #ifdef GetClassName
 #undef GetClassName
@@ -118,7 +119,7 @@ public:
     uintptr_t ResolvePath(uintptr_t root, const std::string& dotted);
 
     // index control
-    bool BuildIndex(DWORD pid, bool force = false);
+    bool BuildIndex(DWORD pid, bool force = false, bool deep = false);
     bool IsIndexBuilding() const { return indexBuilding_.load(std::memory_order_relaxed); }
     void RequestIndexCancel() { indexCancel_.store(true, std::memory_order_relaxed); }
     // ms since the last completed pass (UINT64_MAX when no pass ever landed);
@@ -248,6 +249,10 @@ private:
     void LogSlowLookup(uintptr_t inst, uint64_t t0, const char* won) const;
     std::vector<std::pair<uintptr_t, uintptr_t>> ScanHeapRegion(HANDLE h, uintptr_t base, size_t size,
         int64_t parentOff, int64_t descOff, int64_t contOff);
+    // Level-parallel BFS from DataModel via live children vectors. Runs on
+    // its own thread overlapping the heap sweep; t0 is the build start for
+    // the warm-snapshot timing print.
+    void RunTraversal(uintptr_t dm, std::chrono::steady_clock::time_point t0);
     uintptr_t TryFakePointer(DWORD pid, uintptr_t base);
     uintptr_t TryVisualEngine(DWORD pid, uintptr_t base);
     uintptr_t TryTaskScheduler(DWORD pid, uintptr_t base);

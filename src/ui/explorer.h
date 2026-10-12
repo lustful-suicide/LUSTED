@@ -25,6 +25,11 @@ public:
     ~Explorer();
 
     void SetStore(InstanceStore* store);
+    // Barrier detach: nulls the store under the exclusive lock, so in-flight
+    // loader/UI uses finish while the store is alive and later uses see null.
+    // The worker calls this before its store dies; without it the loader's
+    // 5s refresh pass reads freed memory (exit AV).
+    void ClearStore();
     void WithStoreExclusive(const std::function<void()>& action);
     void SetPidPtr(DWORD* pid) { pid_ = pid; }
     void SetOpen(bool open) { open_.store(open); }
@@ -56,7 +61,9 @@ private:
     // retries "?" names). Runs on the loader thread, never the UI thread.
     void RefreshExpanded();
 
-    InstanceStore* store_ = nullptr;
+    // Atomic: the loader thread, UI thread, and owning worker race on this
+    // pointer. Every user snapshots once into a local and null-checks that.
+    std::atomic<InstanceStore*> store_{ nullptr };
     std::shared_mutex storeAccessMutex_;
     DWORD* pid_ = nullptr;
     std::atomic<bool> open_{ true };

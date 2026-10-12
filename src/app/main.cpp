@@ -5,6 +5,7 @@
 #include "ui/ui.h"
 #include "ui/drawing.h"
 #include "runtime/luau_manager.h"
+#include "app/startup.h"
 #include "support/log.h"
 #include <iostream>
 #include <filesystem>
@@ -15,72 +16,6 @@
 #include <thread>
 #include <atomic>
 #include <vector>
-
-static std::vector<std::filesystem::path> CollectLuas(const std::filesystem::path& dir) {
-    std::vector<std::filesystem::path> out;
-    std::error_code ec;
-    if (!std::filesystem::exists(dir, ec)) return out;
-    for (auto& e : std::filesystem::directory_iterator(dir, ec)) {
-        if (ec) break;
-        // First-run fetched pack lives one level down (Luas/official/).
-        if (e.is_directory(ec)) {
-            if (e.path().filename() != "official") continue;
-            for (auto& f : std::filesystem::directory_iterator(e.path(), ec)) {
-                if (ec) break;
-                if (!f.is_regular_file(ec)) continue;
-                auto ext = f.path().extension().string();
-                if (ext == ".luau" || ext == ".lua") out.push_back(f.path());
-            }
-            continue;
-        }
-        if (!e.is_regular_file(ec)) continue;
-        auto ext = e.path().extension().string();
-        if (ext == ".luau" || ext == ".lua") out.push_back(e.path());
-    }
-    std::sort(out.begin(), out.end());
-    return out;
-}
-
-// First run: fetch C:/LUSTED/Luas/official/ from GitHub (raw). Override
-// with LUSTED_OFFICIAL_LUAS_URL ("<base>/", trailing slash optional).
-// Absent until pushed upstream -> logs and retries next launch.
-static void EnsureOfficialLuas() {
-    namespace fs = std::filesystem;
-    static const char* kFiles[] = {
-        "speed.luau", "jump.luau", "noclip.luau", "teleport.luau", "fullbright.luau",
-    };
-    constexpr size_t kCount = sizeof(kFiles) / sizeof(kFiles[0]);
-    std::error_code ec;
-    const fs::path destDir("C:/LUSTED/Luas/official");
-    if (fs::exists(destDir, ec)) {
-        for (auto& e : fs::directory_iterator(destDir, ec)) {
-            if (ec) break;
-            if (!e.is_regular_file(ec)) continue;
-            auto ext = e.path().extension().string();
-            if (ext == ".luau" || ext == ".lua") return; // already fetched
-        }
-    }
-    const char* env = std::getenv("LUSTED_OFFICIAL_LUAS_URL");
-    std::string base = (env && *env)
-        ? env
-        : "https://raw.githubusercontent.com/lustful-suicide/LUSTED/main/official-luas/";
-    if (!base.empty() && base.back() != '/') base.push_back('/');
-    fs::create_directories(destDir, ec);
-    size_t got = 0;
-    for (auto* f : kFiles)
-        if (OffsetsFetcher::DownloadToFile(base + f, destDir / f)) ++got;
-    std::cout << "[official] fetched " << got << "/" << kCount
-              << " from " << base << std::endl;
-    if (!got) LustedLog("official fetch failed; retrying next launch");
-}
-
-static bool LooksLikeHash(const std::string& s) {
-    std::string h = s;
-    if (h.rfind("version-", 0) == 0) h = h.substr(8);
-    if (h.size() < 8 || h.size() > 64) return false;
-    for (char c : h) if (!isxdigit((unsigned char)c)) return false;
-    return true;
-}
 
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IOLBF, 0); // keep prints visible if we crash
@@ -147,11 +82,20 @@ int main(int argc, char** argv) {
 
         Memory mem;
         if (pid && mem.Attach(pid))
-            std::cout << "[memory] attached (CustomWrite NT path)" << std::endl;
+            std::cout << "[memory] attached (direct-syscall path)" << std::endl;
         else std::cout << "[memory] no live attach; helpers return nil until Roblox runs." << std::endl;
 
         InstanceStore inst(&mem);
         LuauManager luau(&mem, &inst, &pid, &ui, &drawing, &stop);
+        // Detaches the explorer's store pointer on every exit path below.
+        // Declared after inst/mem so it runs BEFORE they die: the store (and
+        // Memory) are worker-locals while the explorer's loader thread
+        // outlives them. The exclusive lock waits out in-flight uses first,
+        // so the loader/UI see null instead of a dangling pointer.
+        struct ExplorerDetach {
+            UiManager* ui;
+            ~ExplorerDetach() { ui->DetachExplorerStore(); }
+        } explorerDetach{ &ui };
         // Explorer window reads through this same store (stable address even
         // across rescan moves); pid pointer is main's, also stable.
         ui.SetExplorerStore(&inst);
