@@ -94,6 +94,62 @@ bool OffsetsFetcher::DownloadToFile(const std::string& url, const std::filesyste
     return (bool)f;
 }
 
+std::string OffsetsFetcher::HttpPostJson(const std::string& url, const std::string& body,
+                                         bool& ok) {
+    ok = false;
+    std::string host, path;
+    INTERNET_PORT port = 0;
+    bool https = true;
+    if (!SplitUrl(url, host, port, path, https)) return "";
+    std::wstring wh(host.begin(), host.end()), wp(path.begin(), path.end());
+
+    HINTERNET ses = WinHttpOpen(L"Lusted/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, nullptr, nullptr, 0);
+    if (!ses) return "";
+    HINTERNET con = WinHttpConnect(ses, wh.c_str(), port, 0);
+    if (!con) { WinHttpCloseHandle(ses); return ""; }
+    DWORD flags = https ? WINHTTP_FLAG_SECURE : 0;
+    HINTERNET req = WinHttpOpenRequest(con, L"POST", wp.c_str(), nullptr, nullptr, nullptr, flags);
+    if (!req) { WinHttpCloseHandle(con); WinHttpCloseHandle(ses); return ""; }
+    const wchar_t* contentType = L"Content-Type: application/json\r\n";
+    bool sent = WinHttpSendRequest(req, contentType, (DWORD)-1L, (LPVOID)body.data(),
+                                   (DWORD)body.size(), (DWORD)body.size(), 0) &&
+                WinHttpReceiveResponse(req, nullptr);
+    std::string data;
+    if (sent) {
+        for (;;) {
+            DWORD avail = 0;
+            if (!WinHttpQueryDataAvailable(req, &avail)) { sent = false; break; }
+            if (avail == 0) break;
+            char buf[8192];
+            DWORD remaining = avail;
+            while (remaining > 0) {
+                DWORD chunk = remaining > sizeof(buf) ? sizeof(buf) : remaining;
+                DWORD rd = 0;
+                if (!WinHttpReadData(req, buf, chunk, &rd) || rd == 0) break;
+                data.append(buf, rd);
+                remaining -= rd;
+            }
+        }
+        DWORD status = 0;
+        DWORD slen = sizeof(status);
+        WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                            nullptr, &status, &slen, nullptr);
+        if (status < 200 || status >= 300) {
+            char eb[64];
+            snprintf(eb, sizeof(eb), "ERROR:HTTP %lu ", (unsigned long)status);
+            WinHttpCloseHandle(req);
+            WinHttpCloseHandle(con);
+            WinHttpCloseHandle(ses);
+            return eb + data;
+        }
+    }
+    WinHttpCloseHandle(req);
+    WinHttpCloseHandle(con);
+    WinHttpCloseHandle(ses);
+    ok = sent;
+    return data;
+}
+
 OffsetBundle OffsetsFetcher::FetchAll() {
     OffsetBundle b;
     b.versionHash = version_;

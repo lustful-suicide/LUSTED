@@ -247,7 +247,7 @@ uintptr_t InstanceStore::ResolvePath(uintptr_t root, const std::string& dotted) 
 }
 
 // legacy single-parent scan (only used if the index is unavailable)
-std::vector<uintptr_t> InstanceStore::ScanChildrenByParent(uintptr_t parent) {
+std::vector<uintptr_t> InstanceStore::ScanChildrenByParent(uintptr_t parent, unsigned maxThreads) {
     std::vector<uintptr_t> out;
     if (!mem_ || !mem_->IsOpen() || !parent) return out;
     HANDLE h = mem_->Handle();
@@ -289,7 +289,7 @@ std::vector<uintptr_t> InstanceStore::ScanChildrenByParent(uintptr_t parent) {
     }
     if (jobs.empty()) return out;
     unsigned hw = std::thread::hardware_concurrency();
-    unsigned threads = std::clamp(hw ? hw : 1u, 1u, 8u);
+    unsigned threads = std::clamp(hw ? hw : 1u, 1u, std::max(1u, maxThreads));
     if (jobs.size() < threads) threads = (unsigned)jobs.size();
     const int64_t pOff = parentOff, dOff = oDesc_, cOff = oCont_;
     std::atomic<size_t> cursor{ 0 };

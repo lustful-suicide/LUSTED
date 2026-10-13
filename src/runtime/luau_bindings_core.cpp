@@ -1,5 +1,8 @@
 #include "runtime/luau_manager.h"
+#include "roblox/script_dump.h"
+#include "support/base64.h"
 #include "platform/windows/memory.h"
+#include "platform/windows/process.h"
 #include "roblox/instance.h"
 #include "ui/ui.h"
 #include "ui/drawing.h"
@@ -63,9 +66,129 @@ static int l_read_string(lua_State* L) {
     lua_pushstring(L, s.c_str());
     return 1;
 }
+static int l_read_bytes(lua_State* L) {
+    // Binary-safe raw read for RE/probing (embedded NULs preserved).
+    if (!g_mem || !g_mem->IsOpen()) { lua_pushstring(L, ""); return 1; }
+    uintptr_t a = ToAddr(L, 1);
+    size_t n = (size_t)lua_tonumber(L, 2);
+    if (n == 0) n = 64;
+    if (n > 65536) n = 65536;
+    std::string s(n, '\0');
+    if (!a || !g_mem->CustomRead(a, s.data(), n)) { lua_pushstring(L, ""); return 1; }
+    lua_pushlstring(L, s.data(), n);
+    return 1;
+}
+// ---- scripts: enumerate + decompile ----
+static int l_list_scripts(lua_State* L) {
+    lua_newtable(L);
+    if (!g_inst || !g_pid) return 1;
+    std::vector<ScriptInfo> out;
+    if (!ListClientScripts(*g_inst, *g_pid, out)) return 1;
+    int i = 1;
+    for (auto& s : out) {
+        lua_createtable(L, 0, 4);
+        PushAddr(L, s.addr);
+        lua_setfield(L, -2, "address");
+        lua_pushstring(L, s.name.c_str());
+        lua_setfield(L, -2, "name");
+        lua_pushstring(L, s.cls.c_str());
+        lua_setfield(L, -2, "class");
+        lua_pushstring(L, s.parentName.c_str());
+        lua_setfield(L, -2, "parent");
+        lua_rawseti(L, -2, i++);
+    }
+    return 1;
+}
+static int l_decompile_bytecode(lua_State* L) {
+    // decompile_bytecode(base64chunk [, filename]) -> source or nil.
+    const char* b64 = lua_tostring(L, 1);
+    const char* fn = lua_tostring(L, 2);
+    if (!b64 || !*b64) {
+        lua_pushnil(L);
+        return 1;
+    }
+    std::vector<uint8_t> chunk;
+    if (!b64::Decode(b64, chunk) || chunk.empty()) {
+        lua_pushnil(L);
+        return 1;
+    }
+    const std::string src = DecompileBytecode(chunk, fn ? fn : "chunk.luau");
+    if (src.empty()) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushlstring(L, src.data(), src.size());
+    return 1;
+}
+static int l_decompile_selftest(lua_State* L) {
+    std::string src;
+    if (!LuauDecompileSelfTest(src)) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushlstring(L, src.data(), src.size());
+    return 1;
+}
+static int l_get_module_base(lua_State* L) {
+    // Base address of a loaded module in the target (for static RVAs).
+    if (!g_mem || !g_mem->IsOpen()) { lua_pushnil(L); return 1; }
+    const char* mod = lua_tostring(L, 1);
+    if (!mod) mod = "RobloxPlayerBeta.exe";
+    uintptr_t base = 0;
+    size_t size = 0;
+    if (!ModuleLocate(g_mem->Handle(), mod, base, size) || !base) {
+        lua_pushnil(L);
+        return 1;
+    }
+    PushAddr(L, base);
+    return 1;
+}
 static int l_read_float(lua_State* L) {
     if (!g_mem || !g_mem->IsOpen()) { lua_pushnil(L); return 1; }
     float v = 0; lua_pushnumber(L, g_mem->Read<float>(ToAddr(L, 1), v) ? v : 0);
+    return 1;
+}
+static int l_get_camera(lua_State* L) {
+    if (!g_inst || !g_pid) { lua_pushnil(L); return 1; }
+    uintptr_t cam = 0;
+    float pos[3] = {}, rot[9] = {}, fov = 0, vpW = 0, vpH = 0;
+    if (!g_inst->GetCamera(*g_pid, cam, pos, rot, fov, vpW, vpH)) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_createtable(L, 0, 6);
+    PushAddr(L, cam); lua_setfield(L, -2, "address");
+    lua_createtable(L, 3, 0);
+    for (int i = 0; i < 3; ++i) { lua_pushnumber(L, pos[i]); lua_rawseti(L, -2, i + 1); }
+    lua_setfield(L, -2, "pos");
+    lua_createtable(L, 9, 0);
+    for (int i = 0; i < 9; ++i) { lua_pushnumber(L, rot[i]); lua_rawseti(L, -2, i + 1); }
+    lua_setfield(L, -2, "rot");
+    lua_pushnumber(L, fov); lua_setfield(L, -2, "fov");
+    lua_createtable(L, 2, 0);
+    lua_pushnumber(L, vpW); lua_rawseti(L, -2, 1);
+    lua_pushnumber(L, vpH); lua_rawseti(L, -2, 2);
+    lua_setfield(L, -2, "viewport");
+    return 1;
+}
+static int l_get_viewmatrix(lua_State* L) {
+    // Row-major 4x4 world->clip from the render engine. Preferred over the
+    // camera basis: aspect/FOV/viewport baked in, nothing to guess.
+    if (!g_inst || !g_pid) { lua_pushnil(L); return 1; }
+    float m[16] = {};
+    if (!g_inst->GetViewMatrix(*g_pid, m)) { lua_pushnil(L); return 1; }
+    lua_createtable(L, 16, 0);
+    for (int i = 0; i < 16; ++i) { lua_pushnumber(L, m[i]); lua_rawseti(L, -2, i + 1); }
+    return 1;
+}
+static int l_get_overlay_size(lua_State* L) {
+    // Live overlay client size: NDC maps into this space.
+    if (!g_dr) { lua_pushnil(L); return 1; }
+    int w = 0, h = 0;
+    if (!g_dr->OverlaySize(w, h)) { lua_pushnil(L); return 1; }
+    lua_createtable(L, 2, 0);
+    lua_pushnumber(L, w); lua_rawseti(L, -2, 1);
+    lua_pushnumber(L, h); lua_rawseti(L, -2, 2);
     return 1;
 }
 static int l_write_float(lua_State* L) {
@@ -364,6 +487,21 @@ static int l_get_cframe(lua_State* L) {
     for (int i = 0; i < 12; ++i) { lua_pushnumber(L, v[i]); lua_rawseti(L, -2, i + 1); }
     return 1;
 }
+static int l_get_position(lua_State* L) {
+    if (!g_inst || !g_mem) { lua_pushnil(L); return 1; }
+    uintptr_t addr = ToAddr(L, 1);
+    const char* classArg = lua_tostring(L, 2);
+    const std::string cls = classArg ? classArg : g_inst->GetClass(addr);
+    PropInfo p = g_inst->ResolveProp(addr, cls, "CFrame");
+    float v[12] = {};
+    if (!p.ok() || p.type != PropType::CF || !g_inst->ReadPropCFrame(p, addr, v)) {
+        lua_pushnil(L); return 1;
+    }
+    lua_pushnumber(L, v[9]);
+    lua_pushnumber(L, v[10]);
+    lua_pushnumber(L, v[11]);
+    return 3;
+}
 static int l_set_cframe(lua_State* L) {
     if (!g_inst || !g_mem) { lua_pushboolean(L, 0); return 1; }
     uintptr_t addr = ToAddr(L, 1);
@@ -422,6 +560,14 @@ void LuauManager::RegisterBindings() {
     lua_pushcfunction(L_, &l_write<uint64_t>, "write_u64"); lua_setglobal(L_, "write_u64");
     lua_pushcfunction(L_, &l_write_bytes, "custom_write"); lua_setglobal(L_, "custom_write");
     lua_pushcfunction(L_, &l_read_string, "read_string"); lua_setglobal(L_, "read_string");
+    lua_pushcfunction(L_, &l_get_module_base, "get_module_base"); lua_setglobal(L_, "get_module_base");
+    lua_pushcfunction(L_, &l_get_viewmatrix, "get_viewmatrix"); lua_setglobal(L_, "get_viewmatrix");
+    lua_pushcfunction(L_, &l_get_overlay_size, "get_overlay_size"); lua_setglobal(L_, "get_overlay_size");
+    lua_pushcfunction(L_, &l_list_scripts, "list_scripts"); lua_setglobal(L_, "list_scripts");
+    lua_pushcfunction(L_, &l_decompile_bytecode, "decompile_bytecode"); lua_setglobal(L_, "decompile_bytecode");
+    lua_pushcfunction(L_, &l_decompile_selftest, "decompile_selftest"); lua_setglobal(L_, "decompile_selftest");
+    lua_pushcfunction(L_, &l_read_bytes, "read_bytes"); lua_setglobal(L_, "read_bytes");
+    lua_pushcfunction(L_, &l_get_camera, "get_camera"); lua_setglobal(L_, "get_camera");
     lua_pushcfunction(L_, &l_read_float, "read_float"); lua_setglobal(L_, "read_float");
     lua_pushcfunction(L_, &l_write_float, "write_float"); lua_setglobal(L_, "write_float");
 
@@ -457,6 +603,7 @@ void LuauManager::RegisterBindings() {
     lua_pushcfunction(L_, &l_prop_offset, "prop_offset"); lua_setglobal(L_, "prop_offset");
     lua_pushcfunction(L_, &l_get_prop_vec3, "get_prop_vec3"); lua_setglobal(L_, "get_prop_vec3");
     lua_pushcfunction(L_, &l_get_cframe, "raw_get_cframe"); lua_setglobal(L_, "raw_get_cframe");
+    lua_pushcfunction(L_, &l_get_position, "get_position"); lua_setglobal(L_, "get_position");
     lua_pushcfunction(L_, &l_set_cframe, "raw_set_cframe"); lua_setglobal(L_, "raw_set_cframe");
     lua_pushcfunction(L_, &l_get_players, "raw_get_players"); lua_setglobal(L_, "raw_get_players");
     lua_pushcfunction(L_, &l_get_player_count, "raw_get_player_count"); lua_setglobal(L_, "raw_get_player_count");

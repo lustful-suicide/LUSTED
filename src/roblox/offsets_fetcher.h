@@ -28,6 +28,9 @@ public:
     static std::string UrlFflagsHpp(const std::string& v);
     // Shared downloader (also used for the first-run official-luas fetch).
     static bool DownloadToFile(const std::string& url, const std::filesystem::path& out);
+    // JSON POST returning the response body. Transport failure -> ok=false;
+    // HTTP non-2xx -> ok=false with body "ERROR:HTTP <status> ...".
+    static std::string HttpPostJson(const std::string& url, const std::string& body, bool& ok);
 
 private:
     std::string version_;

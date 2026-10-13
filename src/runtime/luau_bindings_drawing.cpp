@@ -87,7 +87,7 @@ static int l_dr_set(lua_State* L) {
     } else if (lua_isnumber(L, 3)) {
         char b[32]; snprintf(b, sizeof(b), "%f", lua_tonumber(L, 3));
         // numbers for Position{X} handled via Vec path; here scalar props
-        if (p == "Position" || p == "From" || p == "To") {
+        if (p == "Position" || p == "From" || p == "To" || p == "Size") {
             ok = g_dr->SetVec(id, p, (float)lua_tonumber(L, 3), (float)lua_tonumber(L, 4));
         } else ok = g_dr->Set(id, p, b);
     } else if (lua_isstring(L, 3)) {

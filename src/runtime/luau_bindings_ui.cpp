@@ -185,6 +185,29 @@ static int l_ui_explorer(lua_State* L) {
     lua_pushboolean(L, g_ui->IsExplorerOpen());
     return 1;
 }
+static int l_is_key_down(lua_State* L) {
+    // is_key_down(virtualKey) -> held right now. Edge-triggered keybind
+    // presses (ui_pressed) can't express hold-to-aim, so poll this per tick.
+    int vk = (int)lua_tonumber(L, 1);
+    if (vk <= 0 || vk >= 256) { lua_pushboolean(L, 0); return 1; }
+    lua_pushboolean(L, (GetAsyncKeyState(vk) & 0x8000) != 0);
+    return 1;
+}
+static int l_mouse_move(lua_State* L) {
+    // mouse_move(dx, dy) -> moved. Relative SendInput move in pixels; the
+    // aimbot loop recomputes the residual each tick, so DPI/scale mismatch
+    // converges instead of accumulating.
+    long dx = (long)lua_tonumber(L, 1);
+    long dy = (long)lua_tonumber(L, 2);
+    if (dx == 0 && dy == 0) { lua_pushboolean(L, 1); return 1; }
+    INPUT input{};
+    input.type = INPUT_MOUSE;
+    input.mi.dwFlags = MOUSEEVENTF_MOVE;
+    input.mi.dx = dx;
+    input.mi.dy = dy;
+    lua_pushboolean(L, SendInput(1, &input, sizeof(input)) == 1);
+    return 1;
+}
 
 void LuauManager::RegisterUi() {
     lua_pushcfunction(L_, &l_ui_label, "ui_label"); lua_setglobal(L_, "ui_label");
@@ -217,6 +240,8 @@ void LuauManager::RegisterUi() {
     lua_pushcfunction(L_, &l_ui_delete_config, "ui_delete_config"); lua_setglobal(L_, "ui_delete_config");
     lua_pushcfunction(L_, &l_ui_toggle_visible, "ui_toggle_visible"); lua_setglobal(L_, "ui_toggle_visible");
     lua_pushcfunction(L_, &l_ui_explorer, "ui_explorer"); lua_setglobal(L_, "ui_explorer");
+    lua_pushcfunction(L_, &l_is_key_down, "is_key_down"); lua_setglobal(L_, "is_key_down");
+    lua_pushcfunction(L_, &l_mouse_move, "mouse_move"); lua_setglobal(L_, "mouse_move");
     lua_pushcfunction(L_, &l_luau_rescan, "luau_rescan"); lua_setglobal(L_, "luau_rescan");
     lua_pushcfunction(L_, &l_luau_run_file, "luau_run_file"); lua_setglobal(L_, "luau_run_file");
     lua_pushcfunction(L_, &l_request_unload, "request_unload"); lua_setglobal(L_, "request_unload");

@@ -67,6 +67,21 @@ end)
 
 The `UI` wrapper groups these calls under `UI`: `UI.Tab`, `UI.Section`, `UI.Label`, `UI.SetLabel`, `UI.Button`, `UI.OnPressed`, `UI.OnChanged`, `UI.Toggle`, `UI.ToggleState`, `UI.SetToggle`, `UI.Slider`, `UI.SliderValue`, `UI.SetSlider`, `UI.Dropdown`, `UI.DropdownValue`, `UI.SetDropdown`, `UI.Input`, `UI.InputValue`, `UI.SetInput`, `UI.Keybind`, `UI.KeybindValue`, `UI.SetKeybind`, `UI.Depends`, config helpers, `UI.Rescan`, `UI.RunFile`, `UI.ToggleVisible`, and `UI.RequestUnload`. Interactive control constructors accept an optional callback as their final argument.
 
+## Input Polling
+
+For hold-to-aim style features, edge-triggered `ui_pressed` is not enough. The native runtime registers:
+
+- `is_key_down(virtualKey)` returns whether a Windows virtual-key code (for example `0x02` for right mouse) is held right now. Out-of-range codes return false.
+- `mouse_move(dx, dy)` issues a relative `SendInput` mouse move in pixels and returns success. Zero movement returns true without sending input.
+
+```lua
+if is_key_down(0x02) then
+    mouse_move(4, 2)
+end
+```
+
+Poll these inside `on_tick`, not inside UI callbacks. See `official-luas/aimbot.luau` for the reference loop: closest-to-crosshair target inside an FOV circle, smoothed by a divisor, with a snap line drawn to the current target.
+
 ## Memory Functions
 
 The native runtime registers:

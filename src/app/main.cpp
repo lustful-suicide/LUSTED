@@ -6,6 +6,8 @@
 #include "ui/drawing.h"
 #include "runtime/luau_manager.h"
 #include "app/startup.h"
+#include "roblox/session.h"
+#include "mcp/mcp_server.h"
 #include "support/log.h"
 #include <iostream>
 #include <filesystem>
@@ -18,6 +20,8 @@
 #include <vector>
 
 int main(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i)
+        if (std::string(argv[i]) == "--mcp") return RunMcpServer();
     setvbuf(stdout, nullptr, _IOLBF, 0); // keep prints visible if we crash
     std::cout << "Lusted external -- finder + offsets + custom-write + luau (auto)" << std::endl;
 
@@ -139,25 +143,15 @@ int main(int argc, char** argv) {
             ui.SetStatus(inst.IsIndexReady() ? "Ready" : "Index failed");
         }
         std::filesystem::path autoDir("C:/LUSTED/Luas");
-        std::error_code ec;
-        std::filesystem::create_directories(autoDir, ec);
-        EnsureOfficialLuas();
-        auto luas = CollectLuas(autoDir);
-        std::cout << "[auto] " << luas.size() << " file(s) in " << autoDir.string() << std::endl;
-        LustedLogf("auto-exec start files=%zu", luas.size());
-        for (auto& f : luas) {
-            std::cout << "[auto] running " << f.string() << std::endl;
-            LustedLogf("script start %s", f.filename().string().c_str());
-            bool ok = luau.RunFile(f);
-            LustedLogf("script end %s ok=%d", f.filename().string().c_str(), ok ? 1 : 0);
-            LustedLogFlush();
-            if (!ok) std::cerr << "[auto] failed: " << f.string() << std::endl;
-        }
-        std::cout << "[run] auto-execution done." << std::endl;
-        LustedLog("auto-exec done");
+        RunAutoFiles(luau, autoDir);
+        // Presence: left-game detection with rejoin wait lives here so the
+        // worker owns mem/inst for the whole session. The monitor reattaches,
+        // rebuilds, and re-runs the auto files when a new game appears.
+        SessionMonitor session(&mem, &inst, &luau, &pid, autoDir);
         done = true;
         while (!once && !stop) {
             luau.Poll();
+            session.Poll();
             Sleep(8);
         }
         // Interactive unload lands here while a pass may still run; in --once

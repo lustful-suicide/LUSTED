@@ -17,15 +17,45 @@ LRESULT CALLBACK DrawingManager::WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_PAINT && g_dr) {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(h, &ps);
-        g_dr->Render(dc);
+        RECT client{};
+        if (GetClientRect(h, &client)) {
+            const int width = client.right - client.left;
+            const int height = client.bottom - client.top;
+            if (width > 0 && height > 0 &&
+                (g_dr->backDc_ == nullptr || g_dr->backWidth_ != width ||
+                 g_dr->backHeight_ != height)) {
+                if (g_dr->backDc_) {
+                    if (g_dr->backBitmapOld_)
+                        SelectObject(g_dr->backDc_, g_dr->backBitmapOld_);
+                    if (g_dr->backBitmap_) DeleteObject(g_dr->backBitmap_);
+                    DeleteDC(g_dr->backDc_);
+                }
+                g_dr->backDc_ = CreateCompatibleDC(dc);
+                g_dr->backBitmap_ = g_dr->backDc_
+                    ? CreateCompatibleBitmap(dc, width, height) : nullptr;
+                g_dr->backBitmapOld_ = g_dr->backBitmap_
+                    ? SelectObject(g_dr->backDc_, g_dr->backBitmap_) : nullptr;
+                g_dr->backWidth_ = g_dr->backBitmap_ ? width : 0;
+                g_dr->backHeight_ = g_dr->backBitmap_ ? height : 0;
+            }
+            if (g_dr->backDc_ && g_dr->backBitmap_) {
+                const int saved = SaveDC(g_dr->backDc_);
+                IntersectClipRect(g_dr->backDc_, ps.rcPaint.left, ps.rcPaint.top,
+                                  ps.rcPaint.right, ps.rcPaint.bottom);
+                g_dr->Render(g_dr->backDc_);
+                BitBlt(dc, ps.rcPaint.left, ps.rcPaint.top,
+                       ps.rcPaint.right - ps.rcPaint.left,
+                       ps.rcPaint.bottom - ps.rcPaint.top,
+                       g_dr->backDc_, ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
+                if (saved) RestoreDC(g_dr->backDc_, saved);
+            } else {
+                g_dr->Render(dc);
+            }
+        }
         EndPaint(h, &ps);
         return 0;
     }
     if (m == WM_ERASEBKGND) return 1; // no flicker fill
-    if (m == WM_TIMER && g_dr) {
-        InvalidateRect(h, nullptr, FALSE);
-        return 0;
-    }
     return DefWindowProcA(h, m, w, l);
 }
 
@@ -89,14 +119,16 @@ void DrawingManager::FollowRoblox() {
     if (IsIconic(r)) { ShowWindow(hwnd_, SW_HIDE); return; }
     ShowWindow(hwnd_, SW_SHOW);
     RECT rc{};
-    GetWindowRect(r, &rc);
-    int w = rc.right - rc.left, h = rc.bottom - rc.top;
+    if (!GetClientRect(r, &rc)) return;
+    POINT origin{ rc.left, rc.top };
+    if (!ClientToScreen(r, &origin)) return;
+    const int w = rc.right - rc.left, h = rc.bottom - rc.top;
     if (w < 10 || h < 10) return;
     RECT cur{};
     GetWindowRect(hwnd_, &cur);
-    if (cur.left != rc.left || cur.top != rc.top ||
+    if (cur.left != origin.x || cur.top != origin.y ||
         (cur.right - cur.left) != w || (cur.bottom - cur.top) != h) {
-        SetWindowPos(hwnd_, HWND_TOPMOST, rc.left, rc.top, w, h,
+        SetWindowPos(hwnd_, HWND_TOPMOST, origin.x, origin.y, w, h,
             SWP_NOACTIVATE | SWP_SHOWWINDOW);
         // Moved/resized: object pixels shifted, repaint everything once.
         std::lock_guard<std::mutex> lk(mtx_);
@@ -125,14 +157,34 @@ bool DrawingManager::Init(DWORD pid) {
     if (!hwnd_) return false;
     SetLayeredWindowAttributes(hwnd_, kKey, 0, LWA_COLORKEY);
     ShowWindow(hwnd_, SW_SHOW);
-    SetTimer(hwnd_, 1, 16, Tick); // ~60fps cadence; Tick skips empty frames
+    SetTimer(hwnd_, 1, 33, Tick); // ~30fps cadence; Tick skips empty frames
     return true;
 }
 
 void DrawingManager::Shutdown() {
     if (hwnd_) { KillTimer(hwnd_, 1); DestroyWindow(hwnd_); hwnd_ = nullptr; }
+    if (backDc_) {
+        if (backBitmapOld_) SelectObject(backDc_, backBitmapOld_);
+        if (backBitmap_) DeleteObject(backBitmap_);
+        DeleteDC(backDc_);
+        backDc_ = nullptr;
+        backBitmap_ = nullptr;
+        backBitmapOld_ = nullptr;
+        backWidth_ = backHeight_ = 0;
+    }
     Clear(); // frees cached fonts
     g_dr = nullptr;
+}
+
+bool DrawingManager::OverlaySize(int& w, int& h) const {
+    w = 0;
+    h = 0;
+    if (!hwnd_) return false;
+    RECT rc{};
+    if (!GetClientRect(hwnd_, &rc)) return false;
+    w = rc.right - rc.left;
+    h = rc.bottom - rc.top;
+    return w > 0 && h > 0;
 }
 
 void DrawingManager::Poll() {

@@ -1,4 +1,5 @@
 #include "runtime/luau_manager.h"
+#include "roblox/script_dump.h"
 #include "platform/windows/memory.h"
 #include "roblox/instance.h"
 #include "ui/ui.h"
@@ -77,6 +78,21 @@ int l_remove_tick(lua_State* L) {
     return 1;
 }
 
+bool LuauDecompileSelfTest(std::string& source) {
+    source.clear();
+    // A real chunk from the bundled compiler exercises the exact bytes the
+    // API expects (header, string table, proto graph).
+    Luau::CompileOptions co;
+    std::string bc;
+    try {
+        bc = Luau::compile("local function add(a, b) return a + b end return add(40, 2)", co);
+    } catch (...) {
+        return false;
+    }
+    if (bc.empty()) return false;
+    source = DecompileBytecode(std::vector<uint8_t>(bc.begin(), bc.end()), "selftest.luau");
+    return !source.empty();
+}
 bool LuauManager::RunString(const std::string& chunk, const std::string& src) {
     Luau::CompileOptions co;
     std::string bc = Luau::compile(src, co);
@@ -101,6 +117,19 @@ bool LuauManager::RunAutoFile(const std::string& filename) {
     if (filename.empty() || leaf.has_parent_path() || leaf.filename() != leaf ||
         (leaf.extension() != ".luau" && leaf.extension() != ".lua")) return false;
     return RunFile(std::filesystem::path("C:/LUSTED/Luas") / leaf);
+}
+void LuauManager::ResetSessionScripts() {
+    if (L_) {
+        for (const auto& callback : buttonCallbacks_) lua_unref(L_, callback.second);
+        buttonCallbacks_.clear();
+        for (const auto& tick : tickCallbacks_) lua_unref(L_, tick.second);
+        tickCallbacks_.clear();
+    }
+    if (dr_) dr_->Clear();
+}
+void LuauManager::SetTargetPid(DWORD pid) {
+    if (ui_) ui_->SetTargetPid(pid);
+    if (dr_) dr_->SetTargetPid(pid);
 }
 bool LuauManager::RescanRoblox() {
     // A background index pass may be merging while this swaps the store;

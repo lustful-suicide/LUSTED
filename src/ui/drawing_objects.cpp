@@ -24,10 +24,9 @@ RECT DrawingManager::BBox(const Obj& o) {
         r.right = (int)(o.x + o.radius) + pad;
         r.bottom = (int)(o.y + o.radius) + pad;
     } else if (o.type == "Text") {
-        const int w = (std::min)(800, (int)(o.text.size() * (size_t)o.size * 6 / 10) + 16);
-        r.left = (int)o.x - pad;
+        r.left = (int)o.x + (o.center ? -o.textWidth / 2 : 0) - pad;
         r.top = (int)o.y - pad;
-        r.right = (int)o.x + w + pad;
+        r.right = r.left + o.textWidth + pad * 2;
         r.bottom = (int)o.y + o.size + pad + 8;
     } else { // Square / Box
         r.left = (int)o.x - pad;
@@ -36,6 +35,14 @@ RECT DrawingManager::BBox(const Obj& o) {
         r.bottom = (int)(o.y + o.h) + pad;
     }
     return r;
+}
+
+int DrawingManager::MeasureTextWidth(const Obj& o) {
+    // Estimate instead of measuring with GDI every text update. GDI font
+    // creation/measurement per call showed up as a hot spot in overlays with
+    // many labels, and the estimate is close enough for box/title centering.
+    if (o.text.empty()) return 0;
+    return std::clamp((int)(o.text.size() * (size_t)o.size * 6 / 10) + 8, 0, 800);
 }
 
 void DrawingManager::TouchLocked(const Obj& o) {
@@ -88,9 +95,17 @@ bool DrawingManager::Set(int id, const std::string& p, const std::string& v) {
     else if (p == "Thickness") o.thickness = (std::clamp)(atoi(v.c_str()), 1, 20);
     else if (p == "Width") o.w = (std::max)(0.0f, (float)atof(v.c_str()));
     else if (p == "Height") o.h = (std::max)(0.0f, (float)atof(v.c_str()));
-    else if (p == "Size" || p == "FontSize") o.size = (std::clamp)(atoi(v.c_str()), 1, 96);
+    else if (p == "Size" || p == "FontSize") {
+        o.size = (std::clamp)(atoi(v.c_str()), 1, 96);
+        if (o.type == "Text") o.textWidth = MeasureTextWidth(o);
+    }
     else if (p == "Radius") o.radius = (std::max)(0.0f, (float)atof(v.c_str()));
-    else if (p == "Text") o.text = v;
+    else if (p == "Text") {
+        if (o.text != v) {
+            o.text = v;
+            o.textWidth = MeasureTextWidth(o);
+        }
+    }
     else return false;
     TouchLocked(o);
     return true;
@@ -271,17 +286,24 @@ void GradientBox(HDC dc, float x, float y, float w, float h, int thick, bool fil
 } // namespace
 
 void DrawingManager::Render(HDC dc) {
-    std::lock_guard<std::mutex> lk(mtx_);
-    // Paint only the invalidated region (dirty rects from Tick), not the
-    // whole screen: a steady scene costs object pixels, not a fullscreen
-    // fill, which is what holds 60fps.
+    // Snapshot under the lock, then paint without it. Holding mtx_ for the
+    // whole GDI pass made every drawing_set on the worker block for the
+    // full paint duration, so overlay latency grew with the object count.
+    // Paint works on copies; fonts resolve per pass in a local cache so no
+    // shared HFONT lifetime is touched off-lock.
+    std::vector<Obj> snap;
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        snap.reserve(objs_.size());
+        for (auto& kv : objs_) snap.push_back(kv.second);
+    }
     RECT rc{};
     if (GetClipBox(dc, &rc) <= 0) return;
     HBRUSH key = CreateSolidBrush(kKey);
     FillRect(dc, &rc, key);
     DeleteObject(key);
-    for (auto& kv : objs_) {
-        Obj& o = kv.second;
+    std::unordered_map<int, HFONT> fonts;
+    for (Obj& o : snap) {
         if (!o.visible) continue;
         // Skip objects fully outside the paint region.
         RECT bb = BBox(o), hit{};
@@ -309,17 +331,20 @@ void DrawingManager::Render(HDC dc) {
             Ellipse(dc, (int)(o.x - o.radius), (int)(o.y - o.radius),
                         (int)(o.x + o.radius), (int)(o.y + o.radius));
         } else if (o.type == "Text") {
-            if (!o.font || o.fontSize != o.size) {
-                if (o.font) DeleteObject(o.font);
-                o.font = CreateFontA(o.size, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+            HFONT f = nullptr;
+            auto fi = fonts.find(o.size);
+            if (fi != fonts.end()) f = fi->second;
+            else {
+                f = CreateFontA(o.size, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                     DEFAULT_QUALITY, DEFAULT_PITCH, "Arial");
-                o.fontSize = o.size;
+                fonts[o.size] = f;
             }
-            HGDIOBJ oldF = o.font ? SelectObject(dc, o.font) : nullptr;
+            HGDIOBJ oldF = f ? SelectObject(dc, f) : nullptr;
             UINT fmt = DT_SINGLELINE | (o.center ? DT_CENTER : DT_LEFT);
-            RECT tr{(int)o.x, (int)o.y, (int)o.x + 800, (int)o.y + 100};
-            DrawTextA(dc, o.text.c_str(), -1, &tr, fmt | DT_NOCLIP);
+            const int left = (int)o.x + (o.center ? -o.textWidth / 2 : 0);
+            RECT tr{left, (int)o.y, left + o.textWidth, (int)o.y + 100};
+            DrawTextA(dc, o.text.c_str(), -1, &tr, fmt);
             if (oldF) SelectObject(dc, oldF);
         }
         SelectObject(dc, oldPen);
@@ -327,4 +352,5 @@ void DrawingManager::Render(HDC dc) {
         DeleteObject(pen);
         if (o.filled) DeleteObject(brush);
     }
+    for (auto& kf : fonts) if (kf.second) DeleteObject(kf.second);
 }

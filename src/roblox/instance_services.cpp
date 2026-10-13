@@ -83,8 +83,6 @@ uintptr_t InstanceStore::GetDataModel(DWORD pid) {
     if (!mem_ || !mem_->IsOpen() || !pid) return 0;
     uintptr_t base = 0; size_t size = 0;
     if (!ModuleInfo(pid, "RobloxPlayerBeta.exe", base, size) || !base) return 0;
-    std::cout << "[datamodel] base=0x" << std::hex << base << " size=0x" << size << std::dec
-              << std::endl;
     if (uintptr_t dm = TryFakePointer(pid, base)) { cachedDm_ = dm; return dm; }
     if (uintptr_t dm = TryVisualEngine(pid, base)) { cachedDm_ = dm; return dm; }
     if (uintptr_t dm = TryTaskScheduler(pid, base)) { cachedDm_ = dm; return dm; }
@@ -177,6 +175,16 @@ std::vector<uintptr_t> InstanceStore::GetPlayers(DWORD pid) {
     return out;
 }
 
+bool InstanceStore::RefreshPlayers(DWORD pid) {
+    uintptr_t players = GetService(pid, "Players");
+    if (!players || IsIndexBuilding()) return false;
+    auto found = ScanChildrenByParent(players, 2);
+    if (found.empty()) return false;
+    std::unique_lock lk(indexMutex_);
+    children_[players] = std::move(found);
+    return true;
+}
+
 uintptr_t InstanceStore::GetLocalPlayer(DWORD pid) {
     // Players.LocalPlayer is the authoritative pointer.
     uintptr_t players = GetService(pid, "Players");
@@ -190,6 +198,27 @@ uintptr_t InstanceStore::GetLocalPlayer(DWORD pid) {
         if (mem_->CustomRead(p + (uintptr_t)lpOff, &flag, 1) && flag) return p;
     }
     return 0;
+}
+
+// Session monitoring must not fall back to a process-wide heap scan when the
+// launcher has no active player. The Players.LocalPlayer pointer is enough to
+// distinguish an experience from the home screen and is cheap to validate.
+uintptr_t InstanceStore::GetLocalPlayerFast(DWORD pid) {
+    uintptr_t players = GetService(pid, "Players");
+    if (!players) return 0;
+    uintptr_t lp = ReadPtr(players + (uintptr_t)oLocalPlayer_);
+    if (!FastReadable(lp) || ReadPtr(lp + 8) != lp) return 0;
+    if (ReadPtr(lp + (uintptr_t)oParent_) != players) return 0;
+    return lp;
+}
+
+std::string InstanceStore::GetExperienceIdentity(DWORD pid) {
+    const uintptr_t dm = GetDataModel(pid);
+    if (!dm) return {};
+    const PropInfo job = ResolveProp(dm, "DataModel", "JobId");
+    if (!job.ok() || (job.type != PropType::RbxString && job.type != PropType::String))
+        return {};
+    return ReadPropString(job, dm);
 }
 
 uintptr_t InstanceStore::GetCharacter(DWORD pid) {
@@ -232,6 +261,11 @@ bool InstanceStore::ModuleInfo(DWORD pid, const std::string& mod, uintptr_t& bas
     // resolve, drop. No Toolhelp snapshot, no kernel32 on the path.
     base = 0; size = 0;
     if (!SysEnsureResolved() || !pid) return false;
+    if (moduleCachePid_ == pid && moduleCacheName_ == mod && moduleCacheBase_ != 0) {
+        base = moduleCacheBase_;
+        size = moduleCacheSize_;
+        return true;
+    }
     SysObjectAttributes oa{};
     oa.Length = sizeof(oa);
     SysClientId cid{};
@@ -245,6 +279,12 @@ bool InstanceStore::ModuleInfo(DWORD pid, const std::string& mod, uintptr_t& bas
     const bool ok = ModuleLocate(h, mod.c_str(), base, size);
     SysCount(kScClose);
     HandleClose(h);
+    if (ok && base) {
+        moduleCachePid_ = pid;
+        moduleCacheName_ = mod;
+        moduleCacheBase_ = base;
+        moduleCacheSize_ = size;
+    }
     return ok;
 }
 uintptr_t InstanceStore::ModuleBase(DWORD pid, const std::string& mod) {

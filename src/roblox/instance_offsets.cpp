@@ -37,6 +37,11 @@ void InstanceStore::RefreshCachedOffsets() {
     oWorkspace_ = pick("DataModel", "Workspace", 336);
     oLocalPlayer_ = pick("Player", "LocalPlayer", 288);
     oModelInstance_ = pick("Player", "ModelInstance", 648);
+    oWsCamera_ = pick("Workspace", "CurrentCamera", 1192);
+    oCamPos_ = pick("Camera", "Position", 0xEC);
+    oCamRot_ = pick("Camera", "Rotation", 0xC8);
+    oCamFov_ = pick("Camera", "FieldOfView", 0x130);
+    oCamViewport_ = pick("Camera", "ViewportSize", 0x2CC);
     // Sub-object classes: any member name that is also a class name.
     // Computed once here (was rebuilt + copied per ResolveProp miss).
     subClasses_.clear();
@@ -127,10 +132,15 @@ InstanceStore::InstanceStore(InstanceStore&& o) noexcept
     : mem_(o.mem_), loaded_(o.loaded_), table_(std::move(o.table_)),
       lowerTable_(std::move(o.lowerTable_)), propCache_(std::move(o.propCache_)),
       manualDm_(o.manualDm_), cachedDm_(o.cachedDm_),
+      moduleCacheName_(std::move(o.moduleCacheName_)),
+      moduleCachePid_(o.moduleCachePid_),
+      moduleCacheBase_(o.moduleCacheBase_), moduleCacheSize_(o.moduleCacheSize_),
       oParent_(o.oParent_), oDesc_(o.oDesc_), oCont_(o.oCont_),
       oName_(o.oName_), oClassName_(o.oClassName_),
       oChildrenStart_(o.oChildrenStart_), oWorkspace_(o.oWorkspace_),
       oLocalPlayer_(o.oLocalPlayer_), oModelInstance_(o.oModelInstance_),
+      oWsCamera_(o.oWsCamera_), oCamPos_(o.oCamPos_), oCamRot_(o.oCamRot_),
+      oCamFov_(o.oCamFov_), oCamViewport_(o.oCamViewport_),
       children_(std::move(o.children_)),
       instances_(std::move(o.instances_)),
       indexReady_(o.indexReady_), indexStamp_(o.indexStamp_), indexPid_(o.indexPid_),
@@ -153,10 +163,16 @@ InstanceStore& InstanceStore::operator=(InstanceStore&& o) noexcept {
         propCache_ = std::move(o.propCache_);
     }
     manualDm_ = o.manualDm_; cachedDm_ = o.cachedDm_;
+    moduleCacheName_ = std::move(o.moduleCacheName_);
+    moduleCachePid_ = o.moduleCachePid_;
+    moduleCacheBase_ = o.moduleCacheBase_;
+    moduleCacheSize_ = o.moduleCacheSize_;
     oParent_ = o.oParent_; oDesc_ = o.oDesc_; oCont_ = o.oCont_;
     oName_ = o.oName_; oClassName_ = o.oClassName_;
     oChildrenStart_ = o.oChildrenStart_; oWorkspace_ = o.oWorkspace_;
     oLocalPlayer_ = o.oLocalPlayer_; oModelInstance_ = o.oModelInstance_;
+    oWsCamera_ = o.oWsCamera_; oCamPos_ = o.oCamPos_; oCamRot_ = o.oCamRot_;
+    oCamFov_ = o.oCamFov_; oCamViewport_ = o.oCamViewport_;
     children_ = std::move(o.children_);
     instances_ = std::move(o.instances_);
     indexReady_ = o.indexReady_; indexStamp_ = o.indexStamp_; indexPid_ = o.indexPid_;

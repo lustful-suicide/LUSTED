@@ -7,8 +7,8 @@
 #include <mutex>
 #include <cstdint>
 
-// Exploit-style Drawing API over a transparent click-through GDI overlay
-// attached to the Roblox window rect (colorkey transparency, no black screen).
+// Drawing API over a transparent click-through GDI overlay attached to the
+// target client area (colorkey transparency, no black screen).
 class DrawingManager {
 public:
     DrawingManager() = default;
@@ -16,8 +16,10 @@ public:
 
     bool Init(DWORD targetPid = 0);
     void Shutdown();
-    void Poll(); // follow Roblox rect + pump messages
+    void Poll(); // follow the target client area + pump messages
     bool IsOpen() const { return hwnd_ != nullptr; }
+    // Live overlay client size in pixels (ESP maps NDC into this space).
+    bool OverlaySize(int& w, int& h) const;
     void SetTargetPid(DWORD pid) { targetPid_.store(pid); }
 
     int New(const std::string& type);
@@ -49,6 +51,7 @@ private:
         bool center = false;
         int size = 16;
         std::string text;
+        int textWidth = 0;
         // Cached GDI font: creating it per frame cost more than all shapes.
         HFONT font = nullptr;
         int fontSize = 0;
@@ -60,12 +63,18 @@ private:
     // Dirty rectangles: repaint covers only changed areas, not the whole
     // screen, so steady 60fps doesn't cost a fullscreen fill per frame.
     static RECT BBox(const Obj& o);
+    static int MeasureTextWidth(const Obj& o);
     void TouchLocked(const Obj& o);
     void TouchIdLocked(int id);
     HWND FindRobloxWindow();
     void FollowRoblox();
 
     HWND hwnd_ = nullptr;
+    HDC backDc_ = nullptr;
+    HBITMAP backBitmap_ = nullptr;
+    HGDIOBJ backBitmapOld_ = nullptr;
+    int backWidth_ = 0;
+    int backHeight_ = 0;
     std::atomic<DWORD> targetPid_{ 0 };
     DWORD cachedPid_ = 0;
     HWND roblox_ = nullptr;

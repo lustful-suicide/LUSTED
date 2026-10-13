@@ -75,7 +75,10 @@ lusted_configure(lusted_process)
 add_library(lusted_roblox STATIC
   src/roblox/offsets_fetcher.cpp
   src/roblox/roblox_finder.cpp
+  src/roblox/session.cpp
+  src/roblox/script_dump.cpp
   src/roblox/instance_offsets.cpp
+  src/roblox/instance_camera.cpp
   src/roblox/instance_index_build.cpp
   src/roblox/instance_index_query.cpp
   src/roblox/instance_props_resolve.cpp
@@ -114,9 +117,10 @@ add_library(lusted_runtime STATIC
 lusted_configure(lusted_runtime)
 target_link_libraries(lusted_runtime PRIVATE lusted_roblox lusted_ui Luau.VM Luau.Compiler)
 
-add_executable(lusted src/app/main.cpp src/app/startup.cpp)
+add_executable(lusted src/app/main.cpp src/app/startup.cpp src/mcp/mcp_server.cpp)
 lusted_configure(lusted)
-target_link_libraries(lusted PRIVATE lusted_runtime lusted_ui lusted_roblox lusted_process)
+target_link_libraries(lusted PRIVATE lusted_runtime lusted_ui lusted_roblox lusted_process
+  nlohmann_json::nlohmann_json Luau.VM Luau.Compiler)
 if(MSVC)
   target_link_options(lusted PRIVATE /LTCG /OPT:REF /OPT:ICF)
 endif()

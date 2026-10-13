@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+class LuauManager;
 
 // Sorted C:/LUSTED/Luas/*.{luau,lua} plus Luas/official/*.
 std::vector<std::filesystem::path> CollectLuas(const std::filesystem::path& dir);
@@ -14,3 +15,7 @@ void EnsureOfficialLuas();
 
 // True for "version-<hash>" and bare hex hashes.
 bool LooksLikeHash(const std::string& s);
+
+// Runs every auto script in the directory (official pack ensured first).
+// Returns the number executed. Shared by startup and session rejoin.
+size_t RunAutoFiles(LuauManager& luau, const std::filesystem::path& autoDir);

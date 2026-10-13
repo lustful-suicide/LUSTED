@@ -117,6 +117,12 @@ public:
     void GetDescendants(uintptr_t inst, std::vector<uintptr_t>& out, int depthLimit = 32);
     uintptr_t WaitForChild(uintptr_t inst, const std::string& name, int timeoutMs = 5000);
     uintptr_t ResolvePath(uintptr_t root, const std::string& dotted);
+    // Camera basis for ESP/projection. Reads through the DataModel.
+    bool GetCamera(DWORD pid, uintptr_t& cam, float pos[3], float rot[9], float& fov,
+                   float& vpW, float& vpH);
+    // Render view-projection matrix (row-major world->clip). Preferred over
+    // the camera basis: aspect/FOV/viewport semantics baked in, no guessing.
+    bool GetViewMatrix(DWORD pid, float m[16]);
 
     // index control
     bool BuildIndex(DWORD pid, bool force = false, bool deep = false);
@@ -160,12 +166,17 @@ public:
 
     // DataModel auto-resolve (cheap validation) + manual override
     uintptr_t GetDataModel(DWORD pid);
+    void ResetDataModelCache() { manualDm_ = 0; cachedDm_ = 0; }
+    void ResetCachedDataModel() { cachedDm_ = 0; }
     void SetDataModel(uintptr_t dm) { manualDm_ = dm; }
     bool IsValidDataModel(uintptr_t dm);
     uintptr_t GetWorkspace(DWORD pid);
     uintptr_t GetService(DWORD pid, const std::string& name);
     std::vector<uintptr_t> GetPlayers(DWORD pid);
+    bool RefreshPlayers(DWORD pid);
     uintptr_t GetLocalPlayer(DWORD pid);
+    uintptr_t GetLocalPlayerFast(DWORD pid);
+    std::string GetExperienceIdentity(DWORD pid);
     uintptr_t GetCharacter(DWORD pid);
     uintptr_t GetHumanoid(DWORD pid);
     uintptr_t GetRootPart(DWORD pid);
@@ -189,6 +200,17 @@ private:
     mutable std::unordered_map<std::string, PropInfo, TransparentStrHash, TransparentStrEq> propCache_;
     uintptr_t manualDm_ = 0;
     uintptr_t cachedDm_ = 0;
+    // Module info is stable for the lifetime of a process (codebase location
+    // does not move), so cache the last locator result to avoid a remote
+    // PEB walk on every DataModel re-resolve.
+    std::string moduleCacheName_;
+    DWORD moduleCachePid_ = 0;
+    uintptr_t moduleCacheBase_ = 0;
+    size_t moduleCacheSize_ = 0;
+    mutable std::mutex viewMatrixMutex_;
+    DWORD viewMatrixPid_ = 0;
+    uintptr_t viewMatrixModuleBase_ = 0;
+    uint64_t viewMatrixResolvedAt_ = 0;
 
     // ---- hot offsets, snapshotted at Load() so per-instance calls avoid
     // two string hashes + temporary std::string construction each time.
@@ -202,6 +224,11 @@ private:
     int64_t oWorkspace_ = 336;
     int64_t oLocalPlayer_ = 288;
     int64_t oModelInstance_ = 648;
+    int64_t oWsCamera_ = 1192;
+    int64_t oCamPos_ = 0xEC;
+    int64_t oCamRot_ = 0xC8;
+    int64_t oCamFov_ = 0x130;
+    int64_t oCamViewport_ = 0x2CC;
     void RefreshCachedOffsets();
     static std::string CacheKey(const std::string& cls, const std::string& member);
 
@@ -245,7 +272,7 @@ private:
     bool IsReadablePtr(uintptr_t p) const { return FastReadable(p); }
     bool IsValidInstance(uintptr_t inst);
     bool IsValidDataModelCheap(uintptr_t dm);
-    std::vector<uintptr_t> ScanChildrenByParent(uintptr_t parent);
+    std::vector<uintptr_t> ScanChildrenByParent(uintptr_t parent, unsigned maxThreads = 8);
     void LogSlowLookup(uintptr_t inst, uint64_t t0, const char* won) const;
     std::vector<std::pair<uintptr_t, uintptr_t>> ScanHeapRegion(HANDLE h, uintptr_t base, size_t size,
         int64_t parentOff, int64_t descOff, int64_t contOff);

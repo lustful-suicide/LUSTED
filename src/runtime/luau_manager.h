@@ -29,6 +29,8 @@ public:
     bool RemoveTickCallback(int id);
     bool RescanRoblox();
     bool RunAutoFile(const std::string& filename);
+    void ResetSessionScripts();
+    void SetTargetPid(DWORD pid);
     void RequestUnload();
     void Poll();
     void Close();
@@ -51,3 +53,7 @@ private:
     std::unordered_map<int, int> tickCallbacks_;
     int nextTickId_ = 1;
 };
+
+// Decompile self-test: compiles a snippet with the bundled compiler and runs
+// the full LunaUX POST path. Proves the integration without game state.
+bool LuauDecompileSelfTest(std::string& source);
